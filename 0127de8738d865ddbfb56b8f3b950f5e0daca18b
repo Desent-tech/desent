@@ -1,0 +1,548 @@
+internal/ingest/quality.go
+  613902e 1,3-13,15-18,20-28,30-31,33-41,43-50,52-66
+internal/admin/sysinfo.go
+  613902e 1,3-9,11-18,20-27,29-30,32-35,37-41,43-47,49-50,52-75,77-93,95-103,105-120
+internal/config/config.go
+  613902e 9-19,24-34
+internal/ingest/ffmpeg.go
+  613902e 3-6,8-9,12,14-17,19-20,22-33,35-39,41-46,48-49,57,59
+internal/ingest/manager.go
+  613902e 21-26,30-34,36-45,47-56,58-66,68-72,78-80,109-113,115,135,168-174
+internal/admin/handler.go
+  613902e 6,8-10,13,16,19-26,29-32,35-41,50-52,155-157,159-160,162-164,166-167,169-184,186-192,194-196,198-204,206-211,213-225,227-228,230-234,236-241,243-254,256-270,272-283
+internal/hls/handler.go
+  613902e 64-67,69,74
+internal/hls/cleaner.go
+  613902e 30-34,36-40
+cmd/server/main.go
+  613902e 10,63-65,83-91,123,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "base_commit_sha": "bf7553a146cd6a7352b545360c670349f0e0a1ac",
+  "prompts": {
+    "613902e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d3c8bace-b40a-49a0-8f76-a333844a5d89",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "m.ovchinnikov <m.ovchinnikov@vk.team>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "Implement the following plan:\n\n# Admin Stats, Viewer Capacity & Quality Toggling\n\n## Context\n\nThe admin dashboard shows basic counts only. Qualities (720p/480p/360p at 30fps) are hardcoded throughout the backend. The streamer needs:\n\n1. **Server stats** — real system metrics (CPU%, system memory, uptime, HLS disk usage) on the admin dashboard\n2. **Viewer capacity** — how many concurrent viewers at each quality, based on configurable bandwidth\n3. **Quality toggling** — enable/disable qualities, persisted in DB, live FFmpeg restart\n4. **Expanded qualities** — add 4K 60fps, 1440p 60fps, 1080p 60fps, 720p 60fps alongside existing 480p/360p\n\nApproach: stdlib only for system stats (read `/proc/*` on Linux, `runtime` fallbacks on macOS). No GPU detection for now.\n\n## Quality Presets\n\n| Name | Resolution | FPS | Video kbps | Audio kbps | Total Mbps |\n|------|-----------|-----|-----------|-----------|-----------|\n| 2160p | 3840×2160 | 60 | 20000 | 192 | ~20.2 |\n| 1440p | 2560×1440 | 60 | 12000 | 160 | ~12.2 |\n| 1080p | 1920×1080 | 60 | 6000 | 128 | ~6.1 |\n| 720p | 1280×720 | 60 | 4000 | 128 | ~4.1 |\n| 480p | 854×480 | 30 | 1500 | 96 | ~1.6 |\n| 360p | 640×360 | 30 | 600 | 64 | ~0.7 |\n\nFFmpeg per-variant settings: 60fps variants use `-g:v:N 120 -keyint_min:v:N 120`, 30fps use `-g:v:N 60 -keyint_min:v:N 60`. Filter includes fps: `-filter:v:N \"scale=W:H,fps=FPS\"`.\n\nDefault enabled: 1080p, 720p, 480p, 360p (4K and 1440p disabled by default — most servers can't handle them).\n\n## Files Overview\n\n### New (2)\n```\ninternal/ingest/quality.go     — Quality type, AllQualities, helpers\ninternal/admin/sysinfo.go      — CPU%, system memory via /proc/* with runtime fallbacks\n```\n\n### Modified — Backend (6)\n```\ninternal/config/config.go      — add ServerBandwidthMbps\ninternal/ingest/ffmpeg.go      — dynamic buildFFmpegArgs with []Quality\ninternal/ingest/manager.go     — add SetQualities, EnabledQualities, Restart, StartedAt\ninternal/admin/handler.go      — add IngestManager interface, stats + quality endpoints\ninternal/hls/handler.go        — StreamStatusHandler reads dynamic qualities\ninternal/hls/cleaner.go        — scan subdirs dynamically\ncmd/server/main.go             — wire new deps, load persisted qualities\n```\n\n### Modified — Frontend (4)\n```\napps/web/lib/api-types.ts      — add ServerStats, QualitiesConfig types\napps/web/lib/api-client.ts     — add getAdminStats, getAdminQualities, updateAdminQualities\napps/web/app/admin/page.tsx    — stats bento cards + viewer capacity\napps/web/app/admin/settings/page.tsx — quality toggle switches section\n```\n\n## Implementation Steps\n\n### Step 1: `internal/ingest/quality.go` (new)\n\n```go\ntype Quality struct {\n    Name          string\n    Width         int\n    Height        int\n    FPS           int\n    VideoBitrateK int\n    MaxRateK      int\n    BufSizeK      int\n    AudioBitrateK int\n}\n```\n\n- `AllQualities` — ordered slice of all 6 presets (2160p→360p)\n- `DefaultQualities` — names enabled by default: `[\"1080p\",\"720p\",\"480p\",\"360p\"]`\n- `TotalBitrateMbps() float64` method\n- `QualityByName(name) *Quality`\n- `FilterQualities(enabled []string) []Quality`\n\n### Step 2: `internal/ingest/ffmpeg.go`\n\nChange `buildFFmpegArgs(rtmpURL, hlsDir string, qualities []Quality) []string`.\n\nKey changes for multi-FPS support:\n- Per-variant `-filter:v:N \"scale=W:H,fps=FPS\"` (embeds fps in filter chain)\n- Per-variant `-g:v:N GOP -keyint_min:v:N GOP` where GOP = FPS × 2\n- Remove the shared `-g 48 -keyint_min 48 -sc_threshold 0` — move to per-variant\n- Keep shared: `-c:v libx264 -preset veryfast -sc_threshold 0`\n- Dynamic `-var_stream_map` from quality names\n\n### Step 3: `internal/ingest/manager.go`\n\nAdd to `Manager`:\n- `qualities []Quality` field (default: `FilterQualities(DefaultQualities)`)\n- `startedAt time.Time`\n\nNew methods:\n- `SetQualities(names []string)` — mutex, never allows empty\n- `EnabledQualities() []string` — returns quality names\n- `Restart()` — SIGTERM to current FFmpeg, Run() loop auto-restarts\n- `StartedAt() time.Time`\n\nModify `runFFmpeg()`: snapshot `m.qualities` under lock, pass to `buildFFmpegArgs`.\n\n### Step 4: `internal/admin/sysinfo.go` (new)\n\nSystem stats collector, stdlib only:\n\n```go\ntype SysInfo struct {\n    CPUUsagePercent float64 // 0-100\n    CPUCores        int\n    MemTotalMB      float64\n    MemUsedMB       float64\n    MemUsedPercent  float64\n}\n\nfunc GetSysInfo() SysInfo\n```\n\nLinux (`/proc`):\n- CPU: read `/proc/stat` twice with 200ms gap, compute delta of idle vs total\n- Memory: parse `/proc/meminfo` for MemTotal, MemAvailable\n\nNon-Linux fallback:\n- CPU: `runtime.NumCPU()`, usage = 0 (not available)\n- Memory: `runtime.MemStats` Sys as approximation\n\nUse build tags: `sysinfo_linux.go` + `sysinfo_other.go`, or just `runtime.GOOS` check in a single file (simpler).\n\n### Step 5: `internal/config/config.go`\n\nAdd `ServerBandwidthMbps int`, env `SERVER_BANDWIDTH_MBPS`, default 100.\n\n### Step 6: `internal/admin/handler.go`\n\nAdd `IngestManager` interface:\n```go\ntype IngestManager interface {\n    IsLive() bool\n    EnabledQualities() []string\n    SetQualities(names []string)\n    Restart()\n    StartedAt() time.Time\n}\n```\n\nExpand `Handler` struct: add `ingestMgr IngestManager`, `hlsDir string`, `defaultBW int`.\nChange `NewHandler(store, ingestMgr, hlsDir, defaultBW)`.\n\nNew routes: `GET /api/admin/stats`, `GET /api/admin/qualities`, `PUT /api/admin/qualities`.\n\n**Stats endpoint** returns:\n```json\n{\n  \"uptime_seconds\": 86400,\n  \"cpu_usage_percent\": 23.5,\n  \"cpu_cores\": 4,\n  \"mem_total_mb\": 8192,\n  \"mem_used_mb\": 3500,\n  \"mem_used_percent\": 42.7,\n  \"mem_go_alloc_mb\": 12.5,\n  \"num_goroutines\": 15,\n  \"hls_disk_usage_mb\": 45.2,\n  \"stream_live\": true,\n  \"qualities\": [\"1080p\", \"720p\", \"480p\", \"360p\"],\n  \"bandwidth_mbps\": 100,\n  \"viewer_capacity\": {\"1080p\": 16, \"720p\": 24, \"480p\": 62, \"360p\": 150}\n}\n```\n\nBandwidth: check settings DB for `server_bandwidth_mbps`, fallback to env var default.\n\n**Quality endpoints**:\n- `GET /api/admin/qualities` → `{ enabled: [...], available: [...] }`\n- `PUT /api/admin/qualities` → validates names, persists as `qualities_enabled: \"720p,480p,360p\"` in settings, calls `SetQualities` + `Restart` if live, returns `{ enabled, available, restarted }`\n\n### Step 7: `internal/hls/handler.go` + `cleaner.go`\n\n`handler.go`: `StreamStatusHandler(lc LiveChecker, ql QualityLister)` — `ql.EnabledQualities()` replaces hardcoded list.\n\n`cleaner.go`: Replace `variants := []string{\"720p\",\"480p\",\"360p\"}` with `os.ReadDir(hlsDir)` to iterate subdirectories.\n\n### Step 8: `cmd/server/main.go`\n\n- Load `qualities_enabled` from settings DB before creating ingest manager\n- `ingestMgr.SetQualities(parsed)` before `Run()`\n- Create HLS dirs for ALL qualities (all 6)\n- `admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps)`\n- `hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr)`\n\n### Step 9: Frontend types + API client\n\n**`api-types.ts`** — add:\n```ts\nexport type ServerStats = {\n  uptime_seconds: number\n  cpu_usage_percent: number\n  cpu_cores: number\n  mem_total_mb: number\n  mem_used_mb: number\n  mem_used_percent: number\n  mem_go_alloc_mb: number\n  num_goroutines: number\n  hls_disk_usage_mb: number\n  stream_live: boolean\n  qualities: string[]\n  bandwidth_mbps: number\n  viewer_capacity: Record<string, number>\n}\n\nexport type QualitiesConfig = {\n  enabled: string[]\n  available: string[]\n  restarted?: boolean\n}\n```\n\n**`api-client.ts`** — add: `getAdminStats()`, `getAdminQualities()`, `updateAdminQualities(enabled[])`.\n\n### Step 10: Admin dashboard (`app/admin/page.tsx`)\n\nAdd `api.getAdminStats()` to the parallel fetch. New bento card rows:\n\n**System stats row** (4 cards):\n- **cpu** — `X%` usage + core count subtitle\n- **memory** — `X / Y MB` used/total + percent subtitle\n- **goroutines** — count\n- **HLS disk** — `X MB`\n\n**Viewer capacity section** (card with sub-grid):\n- Header: \"viewer capacity\" + bandwidth display\n- Grid of per-quality cards: quality name + max viewer count\n- Only shows enabled qualities\n\n### Step 11: Quality toggles (`app/admin/settings/page.tsx`)\n\nNew \"stream qualities\" section above the generic key-value settings:\n- Bento card per available quality (2-col grid)\n- Each card: quality name, resolution + fps + bitrate info\n- Toggle switch (accent color when on)\n- Last enabled toggle disabled (can't have zero)\n- On toggle: calls `updateAdminQualities`, toast with restart warning if live\n- Visual grouping: 60fps qualities vs 30fps qualities\n\n## Quality Toggle Data Flow\n\n```\nAdmin toggles 480p OFF →\n  PUT /api/admin/qualities { enabled: [\"1080p\",\"720p\",\"360p\"] } →\n  validate → persist \"qualities_enabled\" to SQLite →\n  ingestMgr.SetQualities → ingestMgr.Restart (if live) →\n  Run() loop → runFFmpeg() with new quality list →\n  response { enabled, available, restarted: true } →\n  toast \"qualities updated, stream restarting\"\n```\n\n## Verification\n\n```bash\ngo build ./cmd/server && go test ./...\ncd web/liches-web && pnpm build\n```\n\n1. `/admin` — see CPU%, memory, goroutines, disk cards\n2. Viewer capacity shows estimates for all enabled qualities\n3. `/admin/settings` — see 6 quality toggle cards (4 on by default, 2160p/1440p off)\n4. Toggle 480p off → toast warns about restart → stream status returns fewer qualities\n5. Try enabling 2160p → works, capacity shows low viewer count (high bitrate)\n6. Can't disable last quality — toggle disabled\n7. Restart server — persisted qualities load correctly\n8. On Linux: CPU% and memory show real system stats\n9. On macOS: CPU% shows 0 (fallback), memory from Go runtime\n\n\nIf you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/m.ovchinnikov/.claude/projects/-Users-m-ovchinnikov-GolandProjects-twitch-desent/d3d362f9-8a30-4280-97d9-5797d35d510c.jsonl",
+          "timestamp": "2026-03-10T11:13:56.450Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Let me start by reading the key files I'll need to modify.",
+          "timestamp": "2026-03-10T11:14:01.979Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/ffmpeg.go"
+          },
+          "timestamp": "2026-03-10T11:14:02.504Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package ingest\n     2→\n     3→import \"fmt\"\n     4→\n     5→func buildFFmpegArgs(rtmpURL, hlsDir string) []string {\n     6→\treturn []string{\n     7→\t\t\"-listen\", \"1\",\n     8→\t\t\"-i\", rtmpURL,\n     9→\n    10→\t\t// 3 copies of video + audio for 3 quality levels\n    11→\t\t\"-map\", \"0:v:0\", \"-map\", \"0:a:0\",\n    12→\t\t\"-map\", \"0:v:0\", \"-map\", \"0:a:0\",\n    13→\t\t\"-map\", \"0:v:0\", \"-map\", \"0:a:0\",\n    14→\n    15→\t\t// Video codec\n    16→\t\t\"-c:v\", \"libx264\",\n    17→\t\t\"-preset\", \"veryfast\",\n    18→\t\t\"-g\", \"48\",\n    19→\t\t\"-keyint_min\", \"48\",\n    20→\t\t\"-sc_threshold\", \"0\",\n    21→\n    22→\t\t// 720p\n    23→\t\t\"-filter:v:0\", \"scale=1280:720\",\n    24→\t\t\"-b:v:0\", \"4000k\", \"-maxrate:v:0\", \"4280k\", \"-bufsize:v:0\", \"8000k\",\n    25→\n    26→\t\t// 480p\n    27→\t\t\"-filter:v:1\", \"scale=854:480\",\n    28→\t\t\"-b:v:1\", \"1500k\", \"-maxrate:v:1\", \"1605k\", \"-bufsize:v:1\", \"3000k\",\n    29→\n    30→\t\t// 360p\n    31→\t\t\"-filter:v:2\", \"scale=640:360\",\n    32→\t\t\"-b:v:2\", \"600k\", \"-maxrate:v:2\", \"642k\", \"-bufsize:v:2\", \"1200k\",\n    33→\n    34→\t\t// Audio\n    35→\t\t\"-c:a\", \"aac\", \"-ar\", \"48000\",\n    36→\t\t\"-b:a:0\", \"128k\",\n    37→\t\t\"-b:a:1\", \"96k\",\n    38→\t\t\"-b:a:2\", \"64k\",\n    39→\n    40→\t\t// HLS output\n    41→\t\t\"-var_stream_map\", \"v:0,a:0,name:720p v:1,a:1,name:480p v:2,a:2,name:360p\",\n    42→\t\t\"-f\", \"hls\",\n    43→\t\t\"-hls_time\", \"2\",\n    44→\t\t\"-hls_list_size\", \"5\",\n    45→\t\t\"-hls_flags\", \"delete_segments+independent_segments+temp_file+program_date_time\",\n    46→\t\t\"-master_pl_name\", \"master.m3u8\",\n    47→\t\t\"-hls_segment_filename\", fmt.Sprintf(\"%s/%%v/seg%%03d.ts\", hlsDir),\n    48→\t\tfmt.Sprintf(\"%s/%%v/index.m3u8\", hlsDir),\n    49→\t}\n    50→}\n    51→",
+          "timestamp": "2026-03-10T11:14:02.522Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/manager.go"
+          },
+          "timestamp": "2026-03-10T11:14:02.978Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package ingest\n     2→\n     3→import (\n     4→\t\"bufio\"\n     5→\t\"context\"\n     6→\t\"log/slog\"\n     7→\t\"os/exec\"\n     8→\t\"sync\"\n     9→\t\"syscall\"\n    10→\t\"time\"\n    11→)\n    12→\n    13→type Config struct {\n    14→\tFFmpegPath string\n    15→\tRTMPAddr   string\n    16→\tStreamKey  string\n    17→\tHLSDir     string\n    18→}\n    19→\n    20→type Manager struct {\n    21→\tcfg     Config\n    22→\tmu      sync.Mutex\n    23→\tcmd     *exec.Cmd\n    24→\trunning bool\n    25→}\n    26→\n    27→func NewManager(cfg Config) *Manager {\n    28→\treturn &Manager{cfg: cfg}\n    29→}\n    30→\n    31→// Run starts the FFmpeg ingest loop. Blocks until ctx is cancelled.\n    32→// Automatically restarts FFmpeg when the stream disconnects.\n    33→func (m *Manager) Run(ctx context.Context) {\n    34→\tfor {\n    35→\t\tselect {\n    36→\t\tcase <-ctx.Done():\n    37→\t\t\tm.stop()\n    38→\t\t\treturn\n    39→\t\tdefault:\n    40→\t\t}\n    41→\n    42→\t\tslog.Info(\"ingest: waiting for RTMP stream\", \"addr\", m.cfg.RTMPAddr, \"key\", m.cfg.StreamKey)\n    43→\t\tif err := m.runFFmpeg(ctx); err != nil {\n    44→\t\t\tif ctx.Err() != nil {\n    45→\t\t\t\treturn\n    46→\t\t\t}\n    47→\t\t\tslog.Warn(\"ingest: FFmpeg exited\", \"err\", err)\n    48→\t\t}\n    49→\n    50→\t\tselect {\n    51→\t\tcase <-ctx.Done():\n    52→\t\t\treturn\n    53→\t\tcase <-time.After(2 * time.Second):\n    54→\t\t}\n    55→\t}\n    56→}\n    57→\n    58→func (m *Manager) runFFmpeg(ctx context.Context) error {\n    59→\trtmpURL := \"rtmp://\" + m.cfg.RTMPAddr + \"/live/\" + m.cfg.StreamKey\n    60→\n    61→\tcmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, buildFFmpegArgs(rtmpURL, m.cfg.HLSDir)...)\n    62→\tcmd.WaitDelay = 5 * time.Second\n    63→\n    64→\tstderr, err := cmd.StderrPipe()\n    65→\tif err != nil {\n    66→\t\treturn err\n    67→\t}\n    68→\n    69→\tm.mu.Lock()\n    70→\tm.cmd = cmd\n    71→\tm.running = true\n    72→\tm.mu.Unlock()\n    73→\n    74→\tif err := cmd.Start(); err != nil {\n    75→\t\tm.mu.Lock()\n    76→\t\tm.running = false\n    77→\t\tm.mu.Unlock()\n    78→\t\treturn err\n    79→\t}\n    80→\n    81→\tslog.Info(\"ingest: FFmpeg started\", \"pid\", cmd.Process.Pid)\n    82→\n    83→\tgo func() {\n    84→\t\tscanner := bufio.NewScanner(stderr)\n    85→\t\tfor scanner.Scan() {\n    86→\t\t\tslog.Debug(\"ffmpeg\", \"line\", scanner.Text())\n    87→\t\t}\n    88→\t}()\n    89→\n    90→\terr = cmd.Wait()\n    91→\n    92→\tm.mu.Lock()\n    93→\tm.running = false\n    94→\tm.mu.Unlock()\n    95→\n    96→\treturn err\n    97→}\n    98→\n    99→func (m *Manager) stop() {\n   100→\tm.mu.Lock()\n   101→\tdefer m.mu.Unlock()\n   102→\tif m.cmd != nil && m.cmd.Process != nil {\n   103→\t\tm.cmd.Process.Signal(syscall.SIGTERM)\n   104→\t}\n   105→}\n   106→\n   107→// IsLive reports whether FFmpeg is currently running (stream is active).\n   108→func (m *Manager) IsLive() bool {\n   109→\tm.mu.Lock()\n   110→\tdefer m.mu.Unlock()\n   111→\treturn m.running\n   112→}\n   113→",
+          "timestamp": "2026-03-10T11:14:02.998Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/config/config.go"
+          },
+          "timestamp": "2026-03-10T11:14:03.479Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package config\n     2→\n     3→import (\n     4→\t\"os\"\n     5→\t\"strconv\"\n     6→)\n     7→\n     8→type Config struct {\n     9→\tHTTPAddr        string\n    10→\tDBPath          string\n    11→\tJWTSecret       string\n    12→\tBcryptCost      int\n    13→\tStreamKey       string\n    14→\tHLSDir          string\n    15→\tRTMPAddr        string\n    16→\tFFmpegPath      string\n    17→\tChatMaxMsgLen   int\n    18→\tChatRateLimitMS int\n    19→}\n    20→\n    21→func Load() *Config {\n    22→\treturn &Config{\n    23→\t\tHTTPAddr:        getEnv(\"HTTP_ADDR\", \":8080\"),\n    24→\t\tDBPath:          getEnv(\"DB_PATH\", \"./desent.db\"),\n    25→\t\tJWTSecret:       getEnv(\"JWT_SECRET\", \"\"),\n    26→\t\tBcryptCost:      getEnvInt(\"BCRYPT_COST\", 12),\n    27→\t\tStreamKey:       getEnv(\"STREAM_KEY\", \"live\"),\n    28→\t\tHLSDir:          getEnv(\"HLS_DIR\", \"/tmp/hls\"),\n    29→\t\tRTMPAddr:        getEnv(\"RTMP_ADDR\", \"0.0.0.0:1935\"),\n    30→\t\tFFmpegPath:      getEnv(\"FFMPEG_PATH\", \"ffmpeg\"),\n    31→\t\tChatMaxMsgLen:   getEnvInt(\"CHAT_MAX_MSG_LEN\", 500),\n    32→\t\tChatRateLimitMS: getEnvInt(\"CHAT_RATE_LIMIT_MS\", 500),\n    33→\t}\n    34→}\n    35→\n    36→func getEnv(key, fallback string) string {\n    37→\tif v := os.Getenv(key); v != \"\" {\n    38→\t\treturn v\n    39→\t}\n    40→\treturn fallback\n    41→}\n    42→\n    43→func getEnvInt(key string, fallback int) int {\n    44→\tif v := os.Getenv(key); v != \"\" {\n    45→\t\tif n, err := strconv.Atoi(v); err == nil {\n    46→\t\t\treturn n\n    47→\t\t}\n    48→\t}\n    49→\treturn fallback\n    50→}\n    51→",
+          "timestamp": "2026-03-10T11:14:03.514Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/handler.go"
+          },
+          "timestamp": "2026-03-10T11:14:04.502Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package admin\n     2→\n     3→import (\n     4→\t\"encoding/json\"\n     5→\t\"log/slog\"\n     6→\t\"net/http\"\n     7→\t\"strconv\"\n     8→\t\"strings\"\n     9→\n    10→\t\"twitch-desent/internal/auth\"\n    11→)\n    12→\n    13→type Handler struct {\n    14→\tstore *Store\n    15→}\n    16→\n    17→func NewHandler(store *Store) *Handler {\n    18→\treturn &Handler{store: store}\n    19→}\n    20→\n    21→func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {\n    22→\tmux.Handle(\"GET /api/admin/settings\", mw(http.HandlerFunc(h.getSettings)))\n    23→\tmux.Handle(\"PUT /api/admin/settings\", mw(http.HandlerFunc(h.updateSettings)))\n    24→\tmux.Handle(\"GET /api/admin/users\", mw(http.HandlerFunc(h.listUsers)))\n    25→\tmux.Handle(\"POST /api/admin/ban\", mw(http.HandlerFunc(h.banUser)))\n    26→\tmux.Handle(\"DELETE /api/admin/ban/{userId}\", mw(http.HandlerFunc(h.unbanUser)))\n    27→}\n    28→\n    29→func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {\n    30→\tsettings, err := h.store.GetSettings(r.Context())\n    31→\tif err != nil {\n    32→\t\tslog.Error(\"admin: get settings\", \"err\", err)\n    33→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    34→\t\treturn\n    35→\t}\n    36→\twriteJSON(w, http.StatusOK, settings)\n    37→}\n    38→\n    39→func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {\n    40→\tvar kv map[string]string\n    41→\tif err := json.NewDecoder(r.Body).Decode(&kv); err != nil {\n    42→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n    43→\t\treturn\n    44→\t}\n    45→\tif len(kv) == 0 {\n    46→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"empty payload\"})\n    47→\t\treturn\n    48→\t}\n    49→\n    50→\tif err := h.store.UpdateSettings(r.Context(), kv); err != nil {\n    51→\t\tslog.Error(\"admin: update settings\", \"err\", err)\n    52→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    53→\t\treturn\n    54→\t}\n    55→\n    56→\tsettings, err := h.store.GetSettings(r.Context())\n    57→\tif err != nil {\n    58→\t\tslog.Error(\"admin: get settings after update\", \"err\", err)\n    59→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    60→\t\treturn\n    61→\t}\n    62→\twriteJSON(w, http.StatusOK, settings)\n    63→}\n    64→\n    65→func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {\n    66→\tusers, err := h.store.ListUsers(r.Context())\n    67→\tif err != nil {\n    68→\t\tslog.Error(\"admin: list users\", \"err\", err)\n    69→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    70→\t\treturn\n    71→\t}\n    72→\twriteJSON(w, http.StatusOK, users)\n    73→}\n    74→\n    75→type banRequest struct {\n    76→\tUserID int64  `json:\"user_id\"`\n    77→\tReason string `json:\"reason\"`\n    78→}\n    79→\n    80→func (h *Handler) banUser(w http.ResponseWriter, r *http.Request) {\n    81→\tvar req banRequest\n    82→\tif err := json.NewDecoder(r.Body).Decode(&req); err != nil {\n    83→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n    84→\t\treturn\n    85→\t}\n    86→\tif req.UserID == 0 {\n    87→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"user_id is required\"})\n    88→\t\treturn\n    89→\t}\n    90→\n    91→\tclaims := auth.ClaimsFromContext(r.Context())\n    92→\tif claims.UserID == req.UserID {\n    93→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"cannot ban yourself\"})\n    94→\t\treturn\n    95→\t}\n    96→\n    97→\tif err := h.store.BanUser(r.Context(), req.UserID, claims.UserID, req.Reason); err != nil {\n    98→\t\tif strings.Contains(err.Error(), \"UNIQUE constraint failed\") {\n    99→\t\t\twriteJSON(w, http.StatusConflict, map[string]string{\"error\": \"user already banned\"})\n   100→\t\t\treturn\n   101→\t\t}\n   102→\t\tslog.Error(\"admin: ban user\", \"err\", err)\n   103→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   104→\t\treturn\n   105→\t}\n   106→\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"banned\"})\n   107→}\n   108→\n   109→func (h *Handler) unbanUser(w http.ResponseWriter, r *http.Request) {\n   110→\tidStr := r.PathValue(\"userId\")\n   111→\tuserID, err := strconv.ParseInt(idStr, 10, 64)\n   112→\tif err != nil {\n   113→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid user ID\"})\n   114→\t\treturn\n   115→\t}\n   116→\n   117→\tif err := h.store.UnbanUser(r.Context(), userID); err != nil {\n   118→\t\tif strings.Contains(err.Error(), \"is not banned\") {\n   119→\t\t\twriteJSON(w, http.StatusNotFound, map[string]string{\"error\": \"user is not banned\"})\n   120→\t\t\treturn\n   121→\t\t}\n   122→\t\tslog.Error(\"admin: unban user\", \"err\", err)\n   123→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   124→\t\treturn\n   125→\t}\n   126→\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"unbanned\"})\n   127→}\n   128→\n   129→func writeJSON(w http.ResponseWriter, status int, v any) {\n   130→\tw.Header().Set(\"Content-Type\", \"application/json\")\n   131→\tw.WriteHeader(status)\n   132→\tjson.NewEncoder(w).Encode(v)\n   133→}\n   134→",
+          "timestamp": "2026-03-10T11:14:04.514Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/handler.go"
+          },
+          "timestamp": "2026-03-10T11:14:04.757Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package hls\n     2→\n     3→import (\n     4→\t\"encoding/json\"\n     5→\t\"net/http\"\n     6→\t\"strings\"\n     7→)\n     8→\n     9→type Handler struct {\n    10→\thlsDir string\n    11→\tfs     http.Handler\n    12→}\n    13→\n    14→func NewHandler(hlsDir string) *Handler {\n    15→\treturn &Handler{\n    16→\t\thlsDir: hlsDir,\n    17→\t\tfs:     http.FileServer(http.Dir(hlsDir)),\n    18→\t}\n    19→}\n    20→\n    21→func (h *Handler) RegisterRoutes(mux *http.ServeMux) {\n    22→\tmux.Handle(\"GET /live/\", h.serveHLS())\n    23→}\n    24→\n    25→func (h *Handler) serveHLS() http.Handler {\n    26→\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n    27→\t\tpath := r.URL.Path\n    28→\n    29→\t\t// CORS\n    30→\t\tw.Header().Set(\"Access-Control-Allow-Origin\", \"*\")\n    31→\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"GET, OPTIONS\")\n    32→\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Range\")\n    33→\t\tw.Header().Set(\"Access-Control-Expose-Headers\", \"Content-Length, Content-Range\")\n    34→\n    35→\t\tif r.Method == http.MethodOptions {\n    36→\t\t\tw.WriteHeader(http.StatusNoContent)\n    37→\t\t\treturn\n    38→\t\t}\n    39→\n    40→\t\t// MIME types and cache\n    41→\t\tif strings.HasSuffix(path, \".m3u8\") {\n    42→\t\t\tw.Header().Set(\"Content-Type\", \"application/vnd.apple.mpegurl\")\n    43→\t\t\tw.Header().Set(\"Cache-Control\", \"no-cache, no-store, must-revalidate\")\n    44→\t\t} else if strings.HasSuffix(path, \".ts\") {\n    45→\t\t\tw.Header().Set(\"Content-Type\", \"video/mp2t\")\n    46→\t\t\tw.Header().Set(\"Cache-Control\", \"public, max-age=3600\")\n    47→\t\t}\n    48→\n    49→\t\t// Strip /live prefix so file paths map to hlsDir\n    50→\t\tr2 := r.Clone(r.Context())\n    51→\t\tr2.URL.Path = strings.TrimPrefix(path, \"/live\")\n    52→\t\tif r2.URL.Path == \"\" {\n    53→\t\t\tr2.URL.Path = \"/\"\n    54→\t\t}\n    55→\t\th.fs.ServeHTTP(w, r2)\n    56→\t})\n    57→}\n    58→\n    59→// StreamStatusHandler returns a handler reporting whether the stream is live.\n    60→type LiveChecker interface {\n    61→\tIsLive() bool\n    62→}\n    63→\n    64→func (h *Handler) StreamStatusHandler(lc LiveChecker) http.HandlerFunc {\n    65→\treturn func(w http.ResponseWriter, r *http.Request) {\n    66→\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n    67→\t\tjson.NewEncoder(w).Encode(map[string]any{\n    68→\t\t\t\"live\":      lc.IsLive(),\n    69→\t\t\t\"qualities\": []string{\"720p\", \"480p\", \"360p\"},\n    70→\t\t})\n    71→\t}\n    72→}\n    73→",
+          "timestamp": "2026-03-10T11:14:04.768Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/cleaner.go"
+          },
+          "timestamp": "2026-03-10T11:14:05.316Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/cmd/server/main.go"
+          },
+          "timestamp": "2026-03-10T11:14:05.317Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package hls\n     2→\n     3→import (\n     4→\t\"context\"\n     5→\t\"log/slog\"\n     6→\t\"os\"\n     7→\t\"path/filepath\"\n     8→\t\"strings\"\n     9→\t\"time\"\n    10→)\n    11→\n    12→// StartCleaner runs a background goroutine that removes stale .ts segments\n    13→// left behind after FFmpeg crashes or restarts.\n    14→func StartCleaner(ctx context.Context, hlsDir string, interval, maxAge time.Duration) {\n    15→\tgo func() {\n    16→\t\tticker := time.NewTicker(interval)\n    17→\t\tdefer ticker.Stop()\n    18→\t\tfor {\n    19→\t\t\tselect {\n    20→\t\t\tcase <-ctx.Done():\n    21→\t\t\t\treturn\n    22→\t\t\tcase <-ticker.C:\n    23→\t\t\t\tcleanSegments(hlsDir, maxAge)\n    24→\t\t\t}\n    25→\t\t}\n    26→\t}()\n    27→}\n    28→\n    29→func cleanSegments(hlsDir string, maxAge time.Duration) {\n    30→\tvariants := []string{\"720p\", \"480p\", \"360p\"}\n    31→\tcutoff := time.Now().Add(-maxAge)\n    32→\tfor _, v := range variants {\n    33→\t\tdir := filepath.Join(hlsDir, v)\n    34→\t\tentries, err := os.ReadDir(dir)\n    35→\t\tif err != nil {\n    36→\t\t\tcontinue\n    37→\t\t}\n    38→\t\tfor _, entry := range entries {\n    39→\t\t\tif entry.IsDir() || !strings.HasSuffix(entry.Name(), \".ts\") {\n    40→\t\t\t\tcontinue\n    41→\t\t\t}\n    42→\t\t\tinfo, err := entry.Info()\n    43→\t\t\tif err != nil {\n    44→\t\t\t\tcontinue\n    45→\t\t\t}\n    46→\t\t\tif info.ModTime().Before(cutoff) {\n    47→\t\t\t\tpath := filepath.Join(dir, entry.Name())\n    48→\t\t\t\tif err := os.Remove(path); err == nil {\n    49→\t\t\t\t\tslog.Debug(\"cleaner: removed stale segment\", \"path\", path)\n    50→\t\t\t\t}\n    51→\t\t\t}\n    52→\t\t}\n    53→\t}\n    54→}\n    55→",
+          "timestamp": "2026-03-10T11:14:05.327Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package main\n     2→\n     3→import (\n     4→\t\"context\"\n     5→\t\"log/slog\"\n     6→\t\"net/http\"\n     7→\t\"os\"\n     8→\t\"os/signal\"\n     9→\t\"path/filepath\"\n    10→\t\"syscall\"\n    11→\t\"time\"\n    12→\n    13→\t\"twitch-desent/internal/admin\"\n    14→\t\"twitch-desent/internal/auth\"\n    15→\t\"twitch-desent/internal/chat\"\n    16→\t\"twitch-desent/internal/config\"\n    17→\t\"twitch-desent/internal/db\"\n    18→\t\"twitch-desent/internal/hls\"\n    19→\t\"twitch-desent/internal/ingest\"\n    20→)\n    21→\n    22→func corsMiddleware(next http.Handler) http.Handler {\n    23→\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n    24→\t\tw.Header().Set(\"Access-Control-Allow-Origin\", \"*\")\n    25→\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"GET, POST, PUT, DELETE, OPTIONS\")\n    26→\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Content-Type, Authorization\")\n    27→\n    28→\t\tif r.Method == http.MethodOptions {\n    29→\t\t\tw.WriteHeader(http.StatusNoContent)\n    30→\t\t\treturn\n    31→\t\t}\n    32→\n    33→\t\tnext.ServeHTTP(w, r)\n    34→\t})\n    35→}\n    36→\n    37→func main() {\n    38→\tslog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{\n    39→\t\tLevel: slog.LevelDebug,\n    40→\t})))\n    41→\n    42→\tcfg := config.Load()\n    43→\tif cfg.JWTSecret == \"\" {\n    44→\t\tslog.Error(\"JWT_SECRET environment variable is required\")\n    45→\t\tos.Exit(1)\n    46→\t}\n    47→\n    48→\t// Database\n    49→\tdatabase, err := db.Open(cfg.DBPath)\n    50→\tif err != nil {\n    51→\t\tslog.Error(\"failed to open database\", \"err\", err)\n    52→\t\tos.Exit(1)\n    53→\t}\n    54→\tdefer database.Close()\n    55→\n    56→\tif err := db.Migrate(database); err != nil {\n    57→\t\tslog.Error(\"failed to run migrations\", \"err\", err)\n    58→\t\tos.Exit(1)\n    59→\t}\n    60→\tslog.Info(\"database ready\", \"path\", cfg.DBPath)\n    61→\n    62→\t// HLS directories\n    63→\tfor _, quality := range []string{\"720p\", \"480p\", \"360p\"} {\n    64→\t\tdir := filepath.Join(cfg.HLSDir, quality)\n    65→\t\tif err := os.MkdirAll(dir, 0755); err != nil {\n    66→\t\t\tslog.Error(\"failed to create HLS dir\", \"path\", dir, \"err\", err)\n    67→\t\t\tos.Exit(1)\n    68→\t\t}\n    69→\t}\n    70→\n    71→\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n    72→\tdefer stop()\n    73→\n    74→\t// Ingest (FFmpeg subprocess)\n    75→\tingestMgr := ingest.NewManager(ingest.Config{\n    76→\t\tFFmpegPath: cfg.FFmpegPath,\n    77→\t\tRTMPAddr:   cfg.RTMPAddr,\n    78→\t\tStreamKey:  cfg.StreamKey,\n    79→\t\tHLSDir:     cfg.HLSDir,\n    80→\t})\n    81→\tgo ingestMgr.Run(ctx)\n    82→\n    83→\t// HLS segment cleaner\n    84→\thls.StartCleaner(ctx, cfg.HLSDir, 30*time.Second, 60*time.Second)\n    85→\n    86→\t// Routes\n    87→\tmux := http.NewServeMux()\n    88→\n    89→\tmux.HandleFunc(\"GET /health\", func(w http.ResponseWriter, r *http.Request) {\n    90→\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n    91→\t\tw.Write([]byte(`{\"status\":\"ok\"}`))\n    92→\t})\n    93→\n    94→\t// Auth\n    95→\tauthStore := auth.NewStore(database)\n    96→\ttokenService := auth.NewTokenService(cfg.JWTSecret)\n    97→\tauthHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost)\n    98→\tauthHandler.RegisterRoutes(mux)\n    99→\n   100→\t// Chat\n   101→\tchatStore := chat.NewStore(database)\n   102→\tchatHub := chat.NewHub(chatStore, ingestMgr)\n   103→\tgo chatHub.Run(ctx)\n   104→\n   105→\tchatHandler := chat.NewHandler(chatHub, chatStore, tokenService, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)\n   106→\tchatHandler.RegisterRoutes(mux)\n   107→\n   108→\t// HLS streaming\n   109→\thlsHandler := hls.NewHandler(cfg.HLSDir)\n   110→\thlsHandler.RegisterRoutes(mux)\n   111→\tmux.HandleFunc(\"GET /api/stream/status\", hlsHandler.StreamStatusHandler(ingestMgr))\n   112→\n   113→\t// Admin API\n   114→\tadminStore := admin.NewStore(database)\n   115→\tadminHandler := admin.NewHandler(adminStore)\n   116→\tadminMW := func(h http.Handler) http.Handler {\n   117→\t\treturn auth.RequireAuth(tokenService)(auth.RequireAdmin(h))\n   118→\t}\n   119→\tadminHandler.RegisterRoutes(mux, adminMW)\n   120→\n   121→\t// Static files (test player)\n   122→\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"./static\"))))\n   123→\n   124→\tsrv := &http.Server{\n   125→\t\tAddr:              cfg.HTTPAddr,\n   126→\t\tHandler:           corsMiddleware(mux),\n   127→\t\tReadHeaderTimeout: 10 * time.Second,\n   128→\t\tWriteTimeout:      30 * time.Second,\n   129→\t\tIdleTimeout:       120 * time.Second,\n   130→\t}\n   131→\n   132→\tgo func() {\n   133→\t\tslog.Info(\"HTTP server listening\", \"addr\", cfg.HTTPAddr)\n   134→\t\tif err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n   135→\t\t\tslog.Error(\"HTTP server error\", \"err\", err)\n   136→\t\t\tos.Exit(1)\n   137→\t\t}\n   138→\t}()\n   139→\n   140→\t<-ctx.Done()\n   141→\tslog.Info(\"shutdown signal received\")\n   142→\n   143→\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)\n   144→\tdefer cancel()\n   145→\n   146→\tif err := srv.Shutdown(shutdownCtx); err != nil {\n   147→\t\tslog.Error(\"HTTP shutdown error\", \"err\", err)\n   148→\t}\n   149→\tslog.Info(\"server stopped\")\n   150→}\n   151→",
+          "timestamp": "2026-03-10T11:14:05.328Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now let me read the frontend files.",
+          "timestamp": "2026-03-10T11:14:09.326Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/web/liches-web/apps/web/lib/api-types.ts"
+          },
+          "timestamp": "2026-03-10T11:14:10.899Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→export type AuthResponse = {\n     2→  token: string\n     3→  role: string\n     4→}\n     5→\n     6→export type StreamStatus = {\n     7→  live: boolean\n     8→  qualities: string[]\n     9→}\n    10→\n    11→export type ChatSession = {\n    12→  id: number\n    13→  started_at: number\n    14→  ended_at: number | null\n    15→}\n    16→\n    17→export type ChatMessage = {\n    18→  id: number\n    19→  session_id: number\n    20→  user_id: number\n    21→  username: string\n    22→  message: string\n    23→  created_at: number\n    24→}\n    25→\n    26→export type ChatSessionsResponse = {\n    27→  sessions: ChatSession[]\n    28→}\n    29→\n    30→export type ChatHistoryResponse = {\n    31→  messages: ChatMessage[]\n    32→}\n    33→\n    34→export type WsChatMessage = {\n    35→  type: \"chat\" | \"system\"\n    36→  text: string\n    37→  user_id?: number\n    38→  username?: string\n    39→  timestamp: number\n    40→}\n    41→\n    42→export type AdminSettings = Record<string, string>\n    43→\n    44→export type UserInfo = {\n    45→  id: number\n    46→  username: string\n    47→  role: string\n    48→  created_at: number\n    49→  banned: boolean\n    50→  ban_reason?: string\n    51→}\n    52→",
+          "timestamp": "2026-03-10T11:14:10.915Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/web/liches-web/apps/web/lib/api-client.ts"
+          },
+          "timestamp": "2026-03-10T11:14:11.775Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→import type {\n     2→  AuthResponse,\n     3→  StreamStatus,\n     4→  ChatSessionsResponse,\n     5→  ChatHistoryResponse,\n     6→  AdminSettings,\n     7→  UserInfo,\n     8→} from \"./api-types\"\n     9→\n    10→const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || \"http://localhost:8080\"\n    11→\n    12→export class ApiError extends Error {\n    13→  constructor(\n    14→    message: string,\n    15→    public status: number,\n    16→  ) {\n    17→    super(message)\n    18→    this.name = \"ApiError\"\n    19→  }\n    20→}\n    21→\n    22→class ApiClient {\n    23→  private baseUrl: string\n    24→\n    25→  constructor(baseUrl: string = BACKEND) {\n    26→    this.baseUrl = baseUrl\n    27→  }\n    28→\n    29→  private getToken(): string | null {\n    30→    if (typeof window === \"undefined\") return null\n    31→    return localStorage.getItem(\"token\")\n    32→  }\n    33→\n    34→  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {\n    35→    const headers: Record<string, string> = {}\n    36→    if (body !== undefined) {\n    37→      headers[\"Content-Type\"] = \"application/json\"\n    38→    }\n    39→    const token = this.getToken()\n    40→    if (token) {\n    41→      headers[\"Authorization\"] = `Bearer ${token}`\n    42→    }\n    43→\n    44→    const res = await fetch(`${this.baseUrl}${path}`, {\n    45→      method,\n    46→      headers,\n    47→      body: body !== undefined ? JSON.stringify(body) : undefined,\n    48→    })\n    49→\n    50→    if (!res.ok) {\n    51→      const data = await res.json().catch(() => ({}))\n    52→      throw new ApiError(data.error || `request failed (${res.status})`, res.status)\n    53→    }\n    54→\n    55→    return res.json() as Promise<T>\n    56→  }\n    57→\n    58→  async get<T>(path: string, params?: Record<string, string>): Promise<T> {\n    59→    let url = path\n    60→    if (params) {\n    61→      const search = new URLSearchParams(params).toString()\n    62→      if (search) url += `?${search}`\n    63→    }\n    64→    return this.request<T>(\"GET\", url)\n    65→  }\n    66→\n    67→  async post<T>(path: string, body?: unknown): Promise<T> {\n    68→    return this.request<T>(\"POST\", path, body)\n    69→  }\n    70→\n    71→  async put<T>(path: string, body?: unknown): Promise<T> {\n    72→    return this.request<T>(\"PUT\", path, body)\n    73→  }\n    74→\n    75→  async delete<T>(path: string): Promise<T> {\n    76→    return this.request<T>(\"DELETE\", path)\n    77→  }\n    78→\n    79→  // Auth\n    80→\n    81→  login(username: string, password: string): Promise<AuthResponse> {\n    82→    return this.post(\"/api/auth/login\", { username, password })\n    83→  }\n    84→\n    85→  register(username: string, password: string): Promise<AuthResponse> {\n    86→    return this.post(\"/api/auth/register\", { username, password })\n    87→  }\n    88→\n    89→  // Stream\n    90→\n    91→  getStreamStatus(): Promise<StreamStatus> {\n    92→    return this.get(\"/api/stream/status\")\n    93→  }\n    94→\n    95→  getHlsUrl(quality: string): string {\n    96→    return `${this.baseUrl}/live/${quality}/index.m3u8`\n    97→  }\n    98→\n    99→  // Chat\n   100→\n   101→  getChatSessions(limit?: number): Promise<ChatSessionsResponse> {\n   102→    const params: Record<string, string> = {}\n   103→    if (limit !== undefined) params.limit = String(limit)\n   104→    return this.get(\"/api/chat/sessions\", params)\n   105→  }\n   106→\n   107→  getChatHistory(sessionId: number, limit?: number, before?: number): Promise<ChatHistoryResponse> {\n   108→    const params: Record<string, string> = {}\n   109→    if (limit !== undefined) params.limit = String(limit)\n   110→    if (before !== undefined) params.before = String(before)\n   111→    return this.get(`/api/chat/history/${sessionId}`, params)\n   112→  }\n   113→\n   114→  getChatWsUrl(token: string): string {\n   115→    const url = new URL(this.baseUrl)\n   116→    url.protocol = url.protocol === \"https:\" ? \"wss:\" : \"ws:\"\n   117→    return `${url.origin}/ws/chat?token=${encodeURIComponent(token)}`\n   118→  }\n   119→\n   120→  // Admin\n   121→\n   122→  getAdminSettings(): Promise<AdminSettings> {\n   123→    return this.get(\"/api/admin/settings\")\n   124→  }\n   125→\n   126→  updateAdminSettings(settings: AdminSettings): Promise<AdminSettings> {\n   127→    return this.put(\"/api/admin/settings\", settings)\n   128→  }\n   129→\n   130→  getAdminUsers(): Promise<UserInfo[]> {\n   131→    return this.get(\"/api/admin/users\")\n   132→  }\n   133→\n   134→  banUser(userId: number, reason: string): Promise<void> {\n   135→    return this.post(\"/api/admin/ban\", { user_id: userId, reason })\n   136→  }\n   137→\n   138→  unbanUser(userId: number): Promise<void> {\n   139→    return this.delete(`/api/admin/ban/${userId}`)\n   140→  }\n   141→}\n   142→\n   143→export const api = new ApiClient()\n   144→",
+          "timestamp": "2026-03-10T11:14:11.792Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/web/liches-web/apps/web/app/admin/page.tsx"
+          },
+          "timestamp": "2026-03-10T11:14:12.182Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→\"use client\"\n     2→\n     3→import { useState, useEffect } from \"react\"\n     4→import Link from \"next/link\"\n     5→import { api } from \"@/lib/api-client\"\n     6→import type { StreamStatus, UserInfo, AdminSettings } from \"@/lib/api-types\"\n     7→\n     8→export default function AdminDashboard() {\n     9→  const [status, setStatus] = useState<StreamStatus | null>(null)\n    10→  const [users, setUsers] = useState<UserInfo[]>([])\n    11→  const [settings, setSettings] = useState<AdminSettings>({})\n    12→  const [loading, setLoading] = useState(true)\n    13→\n    14→  useEffect(() => {\n    15→    Promise.all([\n    16→      api.getStreamStatus().catch(() => ({ live: false, qualities: [] }) as StreamStatus),\n    17→      api.getAdminUsers().catch(() => [] as UserInfo[]),\n    18→      api.getAdminSettings().catch(() => ({}) as AdminSettings),\n    19→    ]).then(([s, u, st]) => {\n    20→      setStatus(s)\n    21→      setUsers(u)\n    22→      setSettings(st)\n    23→      setLoading(false)\n    24→    })\n    25→  }, [])\n    26→\n    27→  if (loading) {\n    28→    return <p className=\"text-sm text-muted-foreground\">loading...</p>\n    29→  }\n    30→\n    31→  const bannedCount = users.filter((u) => u.banned).length\n    32→\n    33→  return (\n    34→    <div className=\"space-y-6\">\n    35→      <h1 className=\"text-xl font-bold\">dashboard</h1>\n    36→\n    37→      {/* Stats grid */}\n    38→      <div className=\"grid grid-cols-2 lg:grid-cols-4 gap-3\">\n    39→        <div className=\"bg-secondary rounded-2xl p-5 flex flex-col justify-between min-h-[100px]\">\n    40→          <p className=\"text-xs text-muted-foreground\">stream</p>\n    41→          <p className=\"text-2xl font-bold tracking-tight\">{status?.live ? \"live\" : \"offline\"}</p>\n    42→        </div>\n    43→        <div className=\"bg-secondary rounded-2xl p-5 flex flex-col justify-between min-h-[100px]\">\n    44→          <p className=\"text-xs text-muted-foreground\">users</p>\n    45→          <p className=\"text-2xl font-bold tracking-tight\">{users.length}</p>\n    46→        </div>\n    47→        <div className=\"bg-secondary rounded-2xl p-5 flex flex-col justify-between min-h-[100px]\">\n    48→          <p className=\"text-xs text-muted-foreground\">banned</p>\n    49→          <p className=\"text-2xl font-bold tracking-tight\">{bannedCount}</p>\n    50→        </div>\n    51→        <div className=\"bg-secondary rounded-2xl p-5 flex flex-col justify-between min-h-[100px]\">\n    52→          <p className=\"text-xs text-muted-foreground\">settings</p>\n    53→          <p className=\"text-2xl font-bold tracking-tight\">{Object.keys(settings).length}</p>\n    54→        </div>\n    55→      </div>\n    56→\n    57→      {/* Quick links */}\n    58→      <div className=\"grid grid-cols-1 sm:grid-cols-2 gap-3\">\n    59→        <Link\n    60→          href=\"/admin/settings\"\n    61→          className=\"bg-card rounded-2xl border border-border p-5 hover:border-accent/30 transition-colors\"\n    62→        >\n    63→          <p className=\"font-semibold text-sm\">settings</p>\n    64→          <p className=\"text-xs text-muted-foreground mt-1\">configure stream title, server options</p>\n    65→        </Link>\n    66→        <Link\n    67→          href=\"/admin/users\"\n    68→          className=\"bg-card rounded-2xl border border-border p-5 hover:border-accent/30 transition-colors\"\n    69→        >\n    70→          <p className=\"font-semibold text-sm\">users</p>\n    71→          <p className=\"text-xs text-muted-foreground mt-1\">manage users, bans, and roles</p>\n    72→        </Link>\n    73→      </div>\n    74→    </div>\n    75→  )\n    76→}\n    77→",
+          "timestamp": "2026-03-10T11:14:12.197Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/web/liches-web/apps/web/app/admin/settings/page.tsx"
+          },
+          "timestamp": "2026-03-10T11:14:12.911Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→\"use client\"\n     2→\n     3→import { useState, useEffect } from \"react\"\n     4→import { api } from \"@/lib/api-client\"\n     5→import { useToast } from \"@/components/toast\"\n     6→import type { AdminSettings } from \"@/lib/api-types\"\n     7→\n     8→export default function AdminSettingsPage() {\n     9→  const [settings, setSettings] = useState<AdminSettings>({})\n    10→  const [original, setOriginal] = useState<AdminSettings>({})\n    11→  const [loading, setLoading] = useState(true)\n    12→  const [saving, setSaving] = useState(false)\n    13→  const [newKey, setNewKey] = useState(\"\")\n    14→  const [newValue, setNewValue] = useState(\"\")\n    15→  const { toast } = useToast()\n    16→\n    17→  useEffect(() => {\n    18→    api\n    19→      .getAdminSettings()\n    20→      .then((data) => {\n    21→        setSettings(data)\n    22→        setOriginal(data)\n    23→      })\n    24→      .catch(() => toast(\"failed to load settings\", \"error\"))\n    25→      .finally(() => setLoading(false))\n    26→  }, [toast])\n    27→\n    28→  const hasChanges = JSON.stringify(settings) !== JSON.stringify(original)\n    29→\n    30→  const handleSave = async () => {\n    31→    setSaving(true)\n    32→    try {\n    33→      const updated = await api.updateAdminSettings(settings)\n    34→      setSettings(updated)\n    35→      setOriginal(updated)\n    36→      toast(\"settings saved\")\n    37→    } catch {\n    38→      toast(\"failed to save settings\", \"error\")\n    39→    } finally {\n    40→      setSaving(false)\n    41→    }\n    42→  }\n    43→\n    44→  const handleAddSetting = () => {\n    45→    const key = newKey.trim()\n    46→    if (!key) return\n    47→    setSettings((prev) => ({ ...prev, [key]: newValue }))\n    48→    setNewKey(\"\")\n    49→    setNewValue(\"\")\n    50→  }\n    51→\n    52→  const handleDelete = (key: string) => {\n    53→    setSettings((prev) => {\n    54→      const next = { ...prev }\n    55→      delete next[key]\n    56→      return next\n    57→    })\n    58→  }\n    59→\n    60→  if (loading) {\n    61→    return <p className=\"text-sm text-muted-foreground\">loading...</p>\n    62→  }\n    63→\n    64→  const formatKey = (key: string) => key.replace(/_/g, \" \")\n    65→\n    66→  return (\n    67→    <div className=\"space-y-6\">\n    68→      <div className=\"flex items-center justify-between\">\n    69→        <h1 className=\"text-xl font-bold\">settings</h1>\n    70→        <button\n    71→          onClick={handleSave}\n    72→          disabled={!hasChanges || saving}\n    73→          className=\"bg-foreground text-background rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-30 hover:opacity-80 transition-opacity\"\n    74→        >\n    75→          {saving ? \"saving...\" : \"save changes\"}\n    76→        </button>\n    77→      </div>\n    78→\n    79→      <div className=\"bg-card rounded-2xl border border-border divide-y divide-border\">\n    80→        {Object.entries(settings).map(([key, value]) => (\n    81→          <div key={key} className=\"flex items-center gap-3 px-5 py-3.5\">\n    82→            <label className=\"text-sm text-muted-foreground w-40 shrink-0\">{formatKey(key)}</label>\n    83→            <input\n    84→              type=\"text\"\n    85→              value={value}\n    86→              onChange={(e) => setSettings((prev) => ({ ...prev, [key]: e.target.value }))}\n    87→              className=\"flex-1 bg-secondary rounded-xl px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground/60 focus:ring-2 focus:ring-accent/30 transition-shadow\"\n    88→            />\n    89→            <button\n    90→              onClick={() => handleDelete(key)}\n    91→              className=\"text-xs text-destructive hover:opacity-70 transition-opacity shrink-0\"\n    92→            >\n    93→              remove\n    94→            </button>\n    95→          </div>\n    96→        ))}\n    97→\n    98→        {Object.keys(settings).length === 0 && (\n    99→          <div className=\"px-5 py-8 text-center\">\n   100→            <p className=\"text-sm text-muted-foreground\">no settings configured</p>\n   101→          </div>\n   102→        )}\n   103→      </div>\n   104→\n   105→      {/* Add new setting */}\n   106→      <div className=\"bg-card rounded-2xl border border-border p-5\">\n   107→        <p className=\"text-sm font-semibold mb-3\">add setting</p>\n   108→        <div className=\"flex items-end gap-3\">\n   109→          <div className=\"flex-1\">\n   110→            <label className=\"text-xs text-muted-foreground\">key</label>\n   111→            <input\n   112→              type=\"text\"\n   113→              value={newKey}\n   114→              onChange={(e) => setNewKey(e.target.value)}\n   115→              placeholder=\"setting_key\"\n   116→              className=\"w-full bg-secondary rounded-xl px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground/60 focus:ring-2 focus:ring-accent/30 transition-shadow mt-1\"\n   117→            />\n   118→          </div>\n   119→          <div className=\"flex-1\">\n   120→            <label className=\"text-xs text-muted-foreground\">value</label>\n   121→            <input\n   122→              type=\"text\"\n   123→              value={newValue}\n   124→              onChange={(e) => setNewValue(e.target.value)}\n   125→              placeholder=\"value\"\n   126→              className=\"w-full bg-secondary rounded-xl px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground/60 focus:ring-2 focus:ring-accent/30 transition-shadow mt-1\"\n   127→            />\n   128→          </div>\n   129→          <button\n   130→            onClick={handleAddSetting}\n   131→            disabled={!newKey.trim()}\n   132→            className=\"bg-secondary text-foreground rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-30 hover:opacity-80 transition-opacity shrink-0\"\n   133→          >\n   134→            add\n   135→          </button>\n   136→        </div>\n   137→      </div>\n   138→    </div>\n   139→  )\n   140→}\n   141→",
+          "timestamp": "2026-03-10T11:14:12.919Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/store.go"
+          },
+          "timestamp": "2026-03-10T11:14:12.958Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package admin\n     2→\n     3→import (\n     4→\t\"context\"\n     5→\t\"fmt\"\n     6→\n     7→\t\"twitch-desent/internal/db\"\n     8→)\n     9→\n    10→type UserInfo struct {\n    11→\tID        int64  `json:\"id\"`\n    12→\tUsername  string `json:\"username\"`\n    13→\tRole      string `json:\"role\"`\n    14→\tCreatedAt int64  `json:\"created_at\"`\n    15→\tBanned    bool   `json:\"banned\"`\n    16→\tBanReason string `json:\"ban_reason,omitempty\"`\n    17→}\n    18→\n    19→type Store struct {\n    20→\tdb *db.DB\n    21→}\n    22→\n    23→func NewStore(d *db.DB) *Store {\n    24→\treturn &Store{db: d}\n    25→}\n    26→\n    27→func (s *Store) GetSettings(ctx context.Context) (map[string]string, error) {\n    28→\trows, err := s.db.Read.QueryContext(ctx, \"SELECT key, value FROM settings\")\n    29→\tif err != nil {\n    30→\t\treturn nil, fmt.Errorf(\"admin: get settings: %w\", err)\n    31→\t}\n    32→\tdefer rows.Close()\n    33→\n    34→\tsettings := make(map[string]string)\n    35→\tfor rows.Next() {\n    36→\t\tvar k, v string\n    37→\t\tif err := rows.Scan(&k, &v); err != nil {\n    38→\t\t\treturn nil, fmt.Errorf(\"admin: scan setting: %w\", err)\n    39→\t\t}\n    40→\t\tsettings[k] = v\n    41→\t}\n    42→\treturn settings, rows.Err()\n    43→}\n    44→\n    45→func (s *Store) UpdateSettings(ctx context.Context, kv map[string]string) error {\n    46→\tfor k, v := range kv {\n    47→\t\t_, err := s.db.Write.ExecContext(ctx,\n    48→\t\t\t\"INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value\",\n    49→\t\t\tk, v,\n    50→\t\t)\n    51→\t\tif err != nil {\n    52→\t\t\treturn fmt.Errorf(\"admin: update setting %q: %w\", k, err)\n    53→\t\t}\n    54→\t}\n    55→\treturn nil\n    56→}\n    57→\n    58→func (s *Store) ListUsers(ctx context.Context) ([]UserInfo, error) {\n    59→\trows, err := s.db.Read.QueryContext(ctx, `\n    60→\t\tSELECT u.id, u.username, u.role, u.created_at,\n    61→\t\t       CASE WHEN b.id IS NOT NULL THEN 1 ELSE 0 END,\n    62→\t\t       COALESCE(b.reason, '')\n    63→\t\tFROM users u\n    64→\t\tLEFT JOIN bans b ON b.user_id = u.id\n    65→\t\tORDER BY u.id`)\n    66→\tif err != nil {\n    67→\t\treturn nil, fmt.Errorf(\"admin: list users: %w\", err)\n    68→\t}\n    69→\tdefer rows.Close()\n    70→\n    71→\tvar users []UserInfo\n    72→\tfor rows.Next() {\n    73→\t\tvar u UserInfo\n    74→\t\tif err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt, &u.Banned, &u.BanReason); err != nil {\n    75→\t\t\treturn nil, fmt.Errorf(\"admin: scan user: %w\", err)\n    76→\t\t}\n    77→\t\tusers = append(users, u)\n    78→\t}\n    79→\treturn users, rows.Err()\n    80→}\n    81→\n    82→func (s *Store) BanUser(ctx context.Context, userID, bannedBy int64, reason string) error {\n    83→\t_, err := s.db.Write.ExecContext(ctx,\n    84→\t\t\"INSERT INTO bans (user_id, banned_by, reason) VALUES (?, ?, ?)\",\n    85→\t\tuserID, bannedBy, reason,\n    86→\t)\n    87→\tif err != nil {\n    88→\t\treturn fmt.Errorf(\"admin: ban user: %w\", err)\n    89→\t}\n    90→\treturn nil\n    91→}\n    92→\n    93→func (s *Store) UnbanUser(ctx context.Context, userID int64) error {\n    94→\tres, err := s.db.Write.ExecContext(ctx, \"DELETE FROM bans WHERE user_id = ?\", userID)\n    95→\tif err != nil {\n    96→\t\treturn fmt.Errorf(\"admin: unban user: %w\", err)\n    97→\t}\n    98→\tn, _ := res.RowsAffected()\n    99→\tif n == 0 {\n   100→\t\treturn fmt.Errorf(\"admin: user %d is not banned\", userID)\n   101→\t}\n   102→\treturn nil\n   103→}\n   104→\n   105→func (s *Store) IsBanned(ctx context.Context, userID int64) (bool, error) {\n   106→\tvar exists bool\n   107→\terr := s.db.Read.QueryRowContext(ctx,\n   108→\t\t\"SELECT EXISTS(SELECT 1 FROM bans WHERE user_id = ?)\", userID,\n   109→\t).Scan(&exists)\n   110→\tif err != nil {\n   111→\t\treturn false, fmt.Errorf(\"admin: check ban: %w\", err)\n   112→\t}\n   113→\treturn exists, nil\n   114→}\n   115→",
+          "timestamp": "2026-03-10T11:14:12.979Z"
+        },
+        {
+          "type": "assistant",
+          "text": "I have all the context. Let me implement this step by step. I'll start with the backend changes (new files first, then modifications), then the frontend.",
+          "timestamp": "2026-03-10T11:14:19.013Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Creating quality.go",
+            "description": "Quality type, AllQualities, DefaultQualities, helpers",
+            "subject": "Create internal/ingest/quality.go"
+          },
+          "timestamp": "2026-03-10T11:14:20.606Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #1 created successfully: Create internal/ingest/quality.go",
+          "timestamp": "2026-03-10T11:14:20.614Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Creating sysinfo.go",
+            "description": "System stats collector with /proc/* and runtime fallbacks",
+            "subject": "Create internal/admin/sysinfo.go"
+          },
+          "timestamp": "2026-03-10T11:14:21.714Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #2 created successfully: Create internal/admin/sysinfo.go",
+          "timestamp": "2026-03-10T11:14:21.716Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Updating backend files",
+            "description": "All backend modifications for quality toggling, stats, viewer capacity",
+            "subject": "Update backend: config, ffmpeg, manager, admin handler, hls, main.go"
+          },
+          "timestamp": "2026-03-10T11:14:23.181Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #3 created successfully: Update backend: config, ffmpeg, manager, admin handler, hls, main.go",
+          "timestamp": "2026-03-10T11:14:23.185Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Updating frontend files",
+            "description": "Frontend types, API methods, admin dashboard stats, quality toggles",
+            "subject": "Update frontend: types, api-client, admin pages"
+          },
+          "timestamp": "2026-03-10T11:14:24.465Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #4 created successfully: Update frontend: types, api-client, admin pages",
+          "timestamp": "2026-03-10T11:14:24.466Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Building and testing",
+            "description": "go build, go test, pnpm build",
+            "subject": "Build and verify"
+          },
+          "timestamp": "2026-03-10T11:14:25.228Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #5 created successfully: Build and verify",
+          "timestamp": "2026-03-10T11:14:25.230Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "1"
+          },
+          "timestamp": "2026-03-10T11:14:28.341Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #1 status",
+          "timestamp": "2026-03-10T11:14:28.343Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 1: `internal/ingest/quality.go`",
+          "timestamp": "2026-03-10T11:14:32.168Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package ingest\n\n// Quality defines a transcoding preset.\ntype Quality struct {\n\tName          string\n\tWidth         int\n\tHeight        int\n\tFPS           int\n\tVideoBitrateK int\n\tMaxRateK      int\n\tBufSizeK      int\n\tAudioBitrateK int\n}\n\n// TotalBitrateMbps returns the combined video+audio bitrate in Mbps.\nfunc (q Quality) TotalBitrateMbps() float64 {\n\treturn float64(q.VideoBitrateK+q.AudioBitrateK) / 1000.0\n}\n\n// AllQualities lists every available preset, highest to lowest.\nvar AllQualities = []Quality{\n\t{Name: \"2160p\", Width: 3840, Height: 2160, FPS: 60, VideoBitrateK: 20000, MaxRateK: 21400, BufSizeK: 40000, AudioBitrateK: 192},\n\t{Name: \"1440p\", Width: 2560, Height: 1440, FPS: 60, VideoBitrateK: 12000, MaxRateK: 12840, BufSizeK: 24000, AudioBitrateK: 160},\n\t{Name: \"1080p\", Width: 1920, Height: 1080, FPS: 60, VideoBitrateK: 6000, MaxRateK: 6420, BufSizeK: 12000, AudioBitrateK: 128},\n\t{Name: \"720p\", Width: 1280, Height: 720, FPS: 60, VideoBitrateK: 4000, MaxRateK: 4280, BufSizeK: 8000, AudioBitrateK: 128},\n\t{Name: \"480p\", Width: 854, Height: 480, FPS: 30, VideoBitrateK: 1500, MaxRateK: 1605, BufSizeK: 3000, AudioBitrateK: 96},\n\t{Name: \"360p\", Width: 640, Height: 360, FPS: 30, VideoBitrateK: 600, MaxRateK: 642, BufSizeK: 1200, AudioBitrateK: 64},\n}\n\n// DefaultQualities are enabled out of the box.\nvar DefaultQualities = []string{\"1080p\", \"720p\", \"480p\", \"360p\"}\n\n// QualityByName returns a pointer to the preset or nil.\nfunc QualityByName(name string) *Quality {\n\tfor i := range AllQualities {\n\t\tif AllQualities[i].Name == name {\n\t\t\treturn &AllQualities[i]\n\t\t}\n\t}\n\treturn nil\n}\n\n// AllQualityNames returns the names of all available presets.\nfunc AllQualityNames() []string {\n\tnames := make([]string, len(AllQualities))\n\tfor i, q := range AllQualities {\n\t\tnames[i] = q.Name\n\t}\n\treturn names\n}\n\n// FilterQualities returns the Quality entries matching the given names,\n// preserving the order from AllQualities. Unknown names are silently skipped.\nfunc FilterQualities(enabled []string) []Quality {\n\tset := make(map[string]bool, len(enabled))\n\tfor _, n := range enabled {\n\t\tset[n] = true\n\t}\n\tvar out []Quality\n\tfor _, q := range AllQualities {\n\t\tif set[q.Name] {\n\t\t\tout = append(out, q)\n\t\t}\n\t}\n\treturn out\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/quality.go"
+          },
+          "timestamp": "2026-03-10T11:14:43.961Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/quality.go",
+          "timestamp": "2026-03-10T11:14:44.082Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "1"
+          },
+          "timestamp": "2026-03-10T11:14:47.625Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #1 status",
+          "timestamp": "2026-03-10T11:14:47.627Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "2"
+          },
+          "timestamp": "2026-03-10T11:14:47.927Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #2 status",
+          "timestamp": "2026-03-10T11:14:47.928Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 2: `internal/admin/sysinfo.go`",
+          "timestamp": "2026-03-10T11:14:52.407Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package admin\n\nimport (\n\t\"os\"\n\t\"runtime\"\n\t\"strconv\"\n\t\"strings\"\n\t\"time\"\n)\n\n// SysInfo holds system-level metrics.\ntype SysInfo struct {\n\tCPUUsagePercent float64\n\tCPUCores        int\n\tMemTotalMB      float64\n\tMemUsedMB       float64\n\tMemUsedPercent  float64\n}\n\n// GetSysInfo collects system stats.\n// On Linux it reads /proc; on other platforms it falls back to Go runtime.\nfunc GetSysInfo() SysInfo {\n\tif runtime.GOOS == \"linux\" {\n\t\treturn getLinuxSysInfo()\n\t}\n\treturn getFallbackSysInfo()\n}\n\nfunc getLinuxSysInfo() SysInfo {\n\tinfo := SysInfo{CPUCores: runtime.NumCPU()}\n\n\t// CPU usage: two samples from /proc/stat\n\tidle1, total1 := readCPUStat()\n\ttime.Sleep(200 * time.Millisecond)\n\tidle2, total2 := readCPUStat()\n\n\tdTotal := total2 - total1\n\tdIdle := idle2 - idle1\n\tif dTotal > 0 {\n\t\tinfo.CPUUsagePercent = float64(dTotal-dIdle) / float64(dTotal) * 100\n\t}\n\n\t// Memory from /proc/meminfo\n\tinfo.MemTotalMB, info.MemUsedMB = readMemInfo()\n\tif info.MemTotalMB > 0 {\n\t\tinfo.MemUsedPercent = info.MemUsedMB / info.MemTotalMB * 100\n\t}\n\n\treturn info\n}\n\nfunc readCPUStat() (idle, total uint64) {\n\tdata, err := os.ReadFile(\"/proc/stat\")\n\tif err != nil {\n\t\treturn 0, 0\n\t}\n\tlines := strings.Split(string(data), \"\\n\")\n\tfor _, line := range lines {\n\t\tif strings.HasPrefix(line, \"cpu \") {\n\t\t\tfields := strings.Fields(line)\n\t\t\tif len(fields) < 5 {\n\t\t\t\treturn 0, 0\n\t\t\t}\n\t\t\t// fields: cpu user nice system idle iowait irq softirq ...\n\t\t\tfor i := 1; i < len(fields); i++ {\n\t\t\t\tv, _ := strconv.ParseUint(fields[i], 10, 64)\n\t\t\t\ttotal += v\n\t\t\t}\n\t\t\tv, _ := strconv.ParseUint(fields[4], 10, 64)\n\t\t\tidle = v\n\t\t\treturn idle, total\n\t\t}\n\t}\n\treturn 0, 0\n}\n\nfunc readMemInfo() (totalMB, usedMB float64) {\n\tdata, err := os.ReadFile(\"/proc/meminfo\")\n\tif err != nil {\n\t\treturn 0, 0\n\t}\n\tvar totalKB, availKB uint64\n\tfor _, line := range strings.Split(string(data), \"\\n\") {\n\t\tif strings.HasPrefix(line, \"MemTotal:\") {\n\t\t\ttotalKB = parseMemInfoValue(line)\n\t\t} else if strings.HasPrefix(line, \"MemAvailable:\") {\n\t\t\tavailKB = parseMemInfoValue(line)\n\t\t}\n\t}\n\ttotalMB = float64(totalKB) / 1024.0\n\tusedMB = float64(totalKB-availKB) / 1024.0\n\treturn totalMB, usedMB\n}\n\nfunc parseMemInfoValue(line string) uint64 {\n\t// line format: \"MemTotal:       16384000 kB\"\n\tfields := strings.Fields(line)\n\tif len(fields) < 2 {\n\t\treturn 0\n\t}\n\tv, _ := strconv.ParseUint(fields[1], 10, 64)\n\treturn v\n}\n\nfunc getFallbackSysInfo() SysInfo {\n\tvar m runtime.MemStats\n\truntime.ReadMemStats(&m)\n\ttotalMB := float64(m.Sys) / 1024.0 / 1024.0\n\tusedMB := float64(m.Alloc) / 1024.0 / 1024.0\n\tpct := 0.0\n\tif totalMB > 0 {\n\t\tpct = usedMB / totalMB * 100\n\t}\n\treturn SysInfo{\n\t\tCPUCores:       runtime.NumCPU(),\n\t\tMemTotalMB:     totalMB,\n\t\tMemUsedMB:      usedMB,\n\t\tMemUsedPercent: pct,\n\t}\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/sysinfo.go"
+          },
+          "timestamp": "2026-03-10T11:15:05.429Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/sysinfo.go",
+          "timestamp": "2026-03-10T11:15:05.522Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "2"
+          },
+          "timestamp": "2026-03-10T11:15:08.473Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #2 status",
+          "timestamp": "2026-03-10T11:15:08.475Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "3"
+          },
+          "timestamp": "2026-03-10T11:15:08.809Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #3 status",
+          "timestamp": "2026-03-10T11:15:08.811Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 3: Update `config.go`",
+          "timestamp": "2026-03-10T11:15:11.636Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/config/config.go",
+            "new_string": "\tChatMaxMsgLen      int\n\tChatRateLimitMS    int\n\tServerBandwidthMbps int\n}",
+            "old_string": "\tChatMaxMsgLen   int\n\tChatRateLimitMS int\n}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-10T11:15:13.345Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/config/config.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:15:18.419Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/config/config.go",
+            "new_string": "\t\tChatMaxMsgLen:      getEnvInt(\"CHAT_MAX_MSG_LEN\", 500),\n\t\tChatRateLimitMS:    getEnvInt(\"CHAT_RATE_LIMIT_MS\", 500),\n\t\tServerBandwidthMbps: getEnvInt(\"SERVER_BANDWIDTH_MBPS\", 100),",
+            "old_string": "\t\tChatMaxMsgLen:   getEnvInt(\"CHAT_MAX_MSG_LEN\", 500),\n\t\tChatRateLimitMS: getEnvInt(\"CHAT_RATE_LIMIT_MS\", 500),",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-10T11:15:22.956Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/config/config.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:15:23.073Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 4: Update `ffmpeg.go` — dynamic quality args",
+          "timestamp": "2026-03-10T11:15:26.049Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package ingest\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nfunc buildFFmpegArgs(rtmpURL, hlsDir string, qualities []Quality) []string {\n\targs := []string{\n\t\t\"-listen\", \"1\",\n\t\t\"-i\", rtmpURL,\n\t}\n\n\t// Map streams: one video + one audio per quality\n\tfor range qualities {\n\t\targs = append(args, \"-map\", \"0:v:0\", \"-map\", \"0:a:0\")\n\t}\n\n\t// Shared video codec settings\n\targs = append(args, \"-c:v\", \"libx264\", \"-preset\", \"veryfast\", \"-sc_threshold\", \"0\")\n\n\t// Per-variant video settings\n\tfor i, q := range qualities {\n\t\tgop := q.FPS * 2\n\t\targs = append(args,\n\t\t\tfmt.Sprintf(\"-filter:v:%d\", i), fmt.Sprintf(\"scale=%d:%d,fps=%d\", q.Width, q.Height, q.FPS),\n\t\t\tfmt.Sprintf(\"-b:v:%d\", i), fmt.Sprintf(\"%dk\", q.VideoBitrateK),\n\t\t\tfmt.Sprintf(\"-maxrate:v:%d\", i), fmt.Sprintf(\"%dk\", q.MaxRateK),\n\t\t\tfmt.Sprintf(\"-bufsize:v:%d\", i), fmt.Sprintf(\"%dk\", q.BufSizeK),\n\t\t\tfmt.Sprintf(\"-g:v:%d\", i), fmt.Sprintf(\"%d\", gop),\n\t\t\tfmt.Sprintf(\"-keyint_min:v:%d\", i), fmt.Sprintf(\"%d\", gop),\n\t\t)\n\t}\n\n\t// Audio\n\targs = append(args, \"-c:a\", \"aac\", \"-ar\", \"48000\")\n\tfor i, q := range qualities {\n\t\targs = append(args, fmt.Sprintf(\"-b:a:%d\", i), fmt.Sprintf(\"%dk\", q.AudioBitrateK))\n\t}\n\n\t// var_stream_map\n\tvar parts []string\n\tfor i, q := range qualities {\n\t\tparts = append(parts, fmt.Sprintf(\"v:%d,a:%d,name:%s\", i, i, q.Name))\n\t}\n\targs = append(args, \"-var_stream_map\", strings.Join(parts, \" \"))\n\n\t// HLS output\n\targs = append(args,\n\t\t\"-f\", \"hls\",\n\t\t\"-hls_time\", \"2\",\n\t\t\"-hls_list_size\", \"5\",\n\t\t\"-hls_flags\", \"delete_segments+independent_segments+temp_file+program_date_time\",\n\t\t\"-master_pl_name\", \"master.m3u8\",\n\t\t\"-hls_segment_filename\", fmt.Sprintf(\"%s/%%v/seg%%03d.ts\", hlsDir),\n\t\tfmt.Sprintf(\"%s/%%v/index.m3u8\", hlsDir),\n\t)\n\n\treturn args\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/ffmpeg.go"
+          },
+          "timestamp": "2026-03-10T11:15:35.008Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/ffmpeg.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:15:40.118Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 5: Update `manager.go` — qualities, restart, startedAt",
+          "timestamp": "2026-03-10T11:15:43.639Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package ingest\n\nimport (\n\t\"bufio\"\n\t\"context\"\n\t\"log/slog\"\n\t\"os/exec\"\n\t\"sync\"\n\t\"syscall\"\n\t\"time\"\n)\n\ntype Config struct {\n\tFFmpegPath string\n\tRTMPAddr   string\n\tStreamKey  string\n\tHLSDir     string\n}\n\ntype Manager struct {\n\tcfg       Config\n\tmu        sync.Mutex\n\tcmd       *exec.Cmd\n\trunning   bool\n\tqualities []Quality\n\tstartedAt time.Time\n}\n\nfunc NewManager(cfg Config) *Manager {\n\treturn &Manager{\n\t\tcfg:       cfg,\n\t\tqualities: FilterQualities(DefaultQualities),\n\t}\n}\n\n// SetQualities updates the enabled quality list. Never allows an empty set.\nfunc (m *Manager) SetQualities(names []string) {\n\tq := FilterQualities(names)\n\tif len(q) == 0 {\n\t\treturn\n\t}\n\tm.mu.Lock()\n\tm.qualities = q\n\tm.mu.Unlock()\n}\n\n// EnabledQualities returns the names of currently enabled qualities.\nfunc (m *Manager) EnabledQualities() []string {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\tnames := make([]string, len(m.qualities))\n\tfor i, q := range m.qualities {\n\t\tnames[i] = q.Name\n\t}\n\treturn names\n}\n\n// Restart sends SIGTERM to the current FFmpeg process.\n// The Run() loop will automatically restart it with the latest qualities.\nfunc (m *Manager) Restart() {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\tif m.cmd != nil && m.cmd.Process != nil {\n\t\tm.cmd.Process.Signal(syscall.SIGTERM)\n\t}\n}\n\n// StartedAt returns when the manager was started.\nfunc (m *Manager) StartedAt() time.Time {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\treturn m.startedAt\n}\n\n// Run starts the FFmpeg ingest loop. Blocks until ctx is cancelled.\n// Automatically restarts FFmpeg when the stream disconnects.\nfunc (m *Manager) Run(ctx context.Context) {\n\tm.mu.Lock()\n\tm.startedAt = time.Now()\n\tm.mu.Unlock()\n\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\tm.stop()\n\t\t\treturn\n\t\tdefault:\n\t\t}\n\n\t\tslog.Info(\"ingest: waiting for RTMP stream\", \"addr\", m.cfg.RTMPAddr, \"key\", m.cfg.StreamKey)\n\t\tif err := m.runFFmpeg(ctx); err != nil {\n\t\t\tif ctx.Err() != nil {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tslog.Warn(\"ingest: FFmpeg exited\", \"err\", err)\n\t\t}\n\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase <-time.After(2 * time.Second):\n\t\t}\n\t}\n}\n\nfunc (m *Manager) runFFmpeg(ctx context.Context) error {\n\trtmpURL := \"rtmp://\" + m.cfg.RTMPAddr + \"/live/\" + m.cfg.StreamKey\n\n\t// Snapshot qualities under lock\n\tm.mu.Lock()\n\tquals := make([]Quality, len(m.qualities))\n\tcopy(quals, m.qualities)\n\tm.mu.Unlock()\n\n\tcmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, buildFFmpegArgs(rtmpURL, m.cfg.HLSDir, quals)...)\n\tcmd.WaitDelay = 5 * time.Second\n\n\tstderr, err := cmd.StderrPipe()\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tm.mu.Lock()\n\tm.cmd = cmd\n\tm.running = true\n\tm.mu.Unlock()\n\n\tif err := cmd.Start(); err != nil {\n\t\tm.mu.Lock()\n\t\tm.running = false\n\t\tm.mu.Unlock()\n\t\treturn err\n\t}\n\n\tslog.Info(\"ingest: FFmpeg started\", \"pid\", cmd.Process.Pid, \"qualities\", qualityNames(quals))\n\n\tgo func() {\n\t\tscanner := bufio.NewScanner(stderr)\n\t\tfor scanner.Scan() {\n\t\t\tslog.Debug(\"ffmpeg\", \"line\", scanner.Text())\n\t\t}\n\t}()\n\n\terr = cmd.Wait()\n\n\tm.mu.Lock()\n\tm.running = false\n\tm.mu.Unlock()\n\n\treturn err\n}\n\nfunc (m *Manager) stop() {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\tif m.cmd != nil && m.cmd.Process != nil {\n\t\tm.cmd.Process.Signal(syscall.SIGTERM)\n\t}\n}\n\n// IsLive reports whether FFmpeg is currently running (stream is active).\nfunc (m *Manager) IsLive() bool {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\treturn m.running\n}\n\nfunc qualityNames(qs []Quality) []string {\n\tnames := make([]string, len(qs))\n\tfor i, q := range qs {\n\t\tnames[i] = q.Name\n\t}\n\treturn names\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/manager.go"
+          },
+          "timestamp": "2026-03-10T11:15:58.601Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/ingest/manager.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:16:03.684Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 6: Update `admin/handler.go` — stats + quality endpoints",
+          "timestamp": "2026-03-10T11:16:06.555Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package admin\n\nimport (\n\t\"encoding/json\"\n\t\"log/slog\"\n\t\"math\"\n\t\"net/http\"\n\t\"os\"\n\t\"path/filepath\"\n\t\"runtime\"\n\t\"strconv\"\n\t\"strings\"\n\t\"time\"\n\n\t\"twitch-desent/internal/auth\"\n\t\"twitch-desent/internal/ingest\"\n)\n\n// IngestManager is the subset of ingest.Manager used by admin endpoints.\ntype IngestManager interface {\n\tIsLive() bool\n\tEnabledQualities() []string\n\tSetQualities(names []string)\n\tRestart()\n\tStartedAt() time.Time\n}\n\ntype Handler struct {\n\tstore     *Store\n\tingestMgr IngestManager\n\thlsDir    string\n\tdefaultBW int\n}\n\nfunc NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int) *Handler {\n\treturn &Handler{\n\t\tstore:     store,\n\t\tingestMgr: ingestMgr,\n\t\thlsDir:    hlsDir,\n\t\tdefaultBW: defaultBW,\n\t}\n}\n\nfunc (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {\n\tmux.Handle(\"GET /api/admin/settings\", mw(http.HandlerFunc(h.getSettings)))\n\tmux.Handle(\"PUT /api/admin/settings\", mw(http.HandlerFunc(h.updateSettings)))\n\tmux.Handle(\"GET /api/admin/users\", mw(http.HandlerFunc(h.listUsers)))\n\tmux.Handle(\"POST /api/admin/ban\", mw(http.HandlerFunc(h.banUser)))\n\tmux.Handle(\"DELETE /api/admin/ban/{userId}\", mw(http.HandlerFunc(h.unbanUser)))\n\tmux.Handle(\"GET /api/admin/stats\", mw(http.HandlerFunc(h.getStats)))\n\tmux.Handle(\"GET /api/admin/qualities\", mw(http.HandlerFunc(h.getQualities)))\n\tmux.Handle(\"PUT /api/admin/qualities\", mw(http.HandlerFunc(h.updateQualities)))\n}\n\nfunc (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {\n\tsettings, err := h.store.GetSettings(r.Context())\n\tif err != nil {\n\t\tslog.Error(\"admin: get settings\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, settings)\n}\n\nfunc (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {\n\tvar kv map[string]string\n\tif err := json.NewDecoder(r.Body).Decode(&kv); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n\t\treturn\n\t}\n\tif len(kv) == 0 {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"empty payload\"})\n\t\treturn\n\t}\n\n\tif err := h.store.UpdateSettings(r.Context(), kv); err != nil {\n\t\tslog.Error(\"admin: update settings\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\n\tsettings, err := h.store.GetSettings(r.Context())\n\tif err != nil {\n\t\tslog.Error(\"admin: get settings after update\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, settings)\n}\n\nfunc (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {\n\tusers, err := h.store.ListUsers(r.Context())\n\tif err != nil {\n\t\tslog.Error(\"admin: list users\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, users)\n}\n\ntype banRequest struct {\n\tUserID int64  `json:\"user_id\"`\n\tReason string `json:\"reason\"`\n}\n\nfunc (h *Handler) banUser(w http.ResponseWriter, r *http.Request) {\n\tvar req banRequest\n\tif err := json.NewDecoder(r.Body).Decode(&req); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n\t\treturn\n\t}\n\tif req.UserID == 0 {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"user_id is required\"})\n\t\treturn\n\t}\n\n\tclaims := auth.ClaimsFromContext(r.Context())\n\tif claims.UserID == req.UserID {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"cannot ban yourself\"})\n\t\treturn\n\t}\n\n\tif err := h.store.BanUser(r.Context(), req.UserID, claims.UserID, req.Reason); err != nil {\n\t\tif strings.Contains(err.Error(), \"UNIQUE constraint failed\") {\n\t\t\twriteJSON(w, http.StatusConflict, map[string]string{\"error\": \"user already banned\"})\n\t\t\treturn\n\t\t}\n\t\tslog.Error(\"admin: ban user\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"banned\"})\n}\n\nfunc (h *Handler) unbanUser(w http.ResponseWriter, r *http.Request) {\n\tidStr := r.PathValue(\"userId\")\n\tuserID, err := strconv.ParseInt(idStr, 10, 64)\n\tif err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid user ID\"})\n\t\treturn\n\t}\n\n\tif err := h.store.UnbanUser(r.Context(), userID); err != nil {\n\t\tif strings.Contains(err.Error(), \"is not banned\") {\n\t\t\twriteJSON(w, http.StatusNotFound, map[string]string{\"error\": \"user is not banned\"})\n\t\t\treturn\n\t\t}\n\t\tslog.Error(\"admin: unban user\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"unbanned\"})\n}\n\n// getStats returns server metrics, stream info, and viewer capacity.\nfunc (h *Handler) getStats(w http.ResponseWriter, r *http.Request) {\n\tsys := GetSysInfo()\n\n\tvar m runtime.MemStats\n\truntime.ReadMemStats(&m)\n\n\tuptime := time.Since(h.ingestMgr.StartedAt()).Seconds()\n\thlsDisk := dirSizeMB(h.hlsDir)\n\tqualities := h.ingestMgr.EnabledQualities()\n\n\tbw := h.getBandwidth(r)\n\tcapacity := viewerCapacity(bw, qualities)\n\n\twriteJSON(w, http.StatusOK, map[string]any{\n\t\t\"uptime_seconds\":    int64(uptime),\n\t\t\"cpu_usage_percent\": math.Round(sys.CPUUsagePercent*10) / 10,\n\t\t\"cpu_cores\":         sys.CPUCores,\n\t\t\"mem_total_mb\":      math.Round(sys.MemTotalMB*10) / 10,\n\t\t\"mem_used_mb\":       math.Round(sys.MemUsedMB*10) / 10,\n\t\t\"mem_used_percent\":  math.Round(sys.MemUsedPercent*10) / 10,\n\t\t\"mem_go_alloc_mb\":   math.Round(float64(m.Alloc)/1024/1024*10) / 10,\n\t\t\"num_goroutines\":    runtime.NumGoroutine(),\n\t\t\"hls_disk_usage_mb\": math.Round(hlsDisk*10) / 10,\n\t\t\"stream_live\":       h.ingestMgr.IsLive(),\n\t\t\"qualities\":         qualities,\n\t\t\"bandwidth_mbps\":    bw,\n\t\t\"viewer_capacity\":   capacity,\n\t})\n}\n\n// getQualities returns enabled and available quality lists.\nfunc (h *Handler) getQualities(w http.ResponseWriter, r *http.Request) {\n\twriteJSON(w, http.StatusOK, map[string]any{\n\t\t\"enabled\":   h.ingestMgr.EnabledQualities(),\n\t\t\"available\": ingest.AllQualityNames(),\n\t})\n}\n\ntype qualitiesRequest struct {\n\tEnabled []string `json:\"enabled\"`\n}\n\n// updateQualities validates, persists, and applies quality changes.\nfunc (h *Handler) updateQualities(w http.ResponseWriter, r *http.Request) {\n\tvar req qualitiesRequest\n\tif err := json.NewDecoder(r.Body).Decode(&req); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n\t\treturn\n\t}\n\n\t// Validate names\n\tvalid := ingest.FilterQualities(req.Enabled)\n\tif len(valid) == 0 {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"at least one valid quality required\"})\n\t\treturn\n\t}\n\n\t// Persist to DB\n\tnames := make([]string, len(valid))\n\tfor i, q := range valid {\n\t\tnames[i] = q.Name\n\t}\n\terr := h.store.UpdateSettings(r.Context(), map[string]string{\n\t\t\"qualities_enabled\": strings.Join(names, \",\"),\n\t})\n\tif err != nil {\n\t\tslog.Error(\"admin: persist qualities\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n\t\treturn\n\t}\n\n\t// Apply\n\th.ingestMgr.SetQualities(names)\n\n\trestarted := false\n\tif h.ingestMgr.IsLive() {\n\t\th.ingestMgr.Restart()\n\t\trestarted = true\n\t}\n\n\twriteJSON(w, http.StatusOK, map[string]any{\n\t\t\"enabled\":   names,\n\t\t\"available\": ingest.AllQualityNames(),\n\t\t\"restarted\": restarted,\n\t})\n}\n\n// getBandwidth reads server_bandwidth_mbps from DB settings, falling back to env default.\nfunc (h *Handler) getBandwidth(r *http.Request) int {\n\tsettings, err := h.store.GetSettings(r.Context())\n\tif err == nil {\n\t\tif v, ok := settings[\"server_bandwidth_mbps\"]; ok {\n\t\t\tif n, err := strconv.Atoi(v); err == nil && n > 0 {\n\t\t\t\treturn n\n\t\t\t}\n\t\t}\n\t}\n\treturn h.defaultBW\n}\n\n// viewerCapacity computes max viewers per quality given total bandwidth.\nfunc viewerCapacity(bandwidthMbps int, qualityNames []string) map[string]int {\n\tcap := make(map[string]int, len(qualityNames))\n\tfor _, name := range qualityNames {\n\t\tq := ingest.QualityByName(name)\n\t\tif q == nil {\n\t\t\tcontinue\n\t\t}\n\t\tbps := q.TotalBitrateMbps()\n\t\tif bps > 0 {\n\t\t\tcap[name] = int(float64(bandwidthMbps) / bps)\n\t\t}\n\t}\n\treturn cap\n}\n\n// dirSizeMB returns total size of files in dir (recursive) in MB.\nfunc dirSizeMB(dir string) float64 {\n\tvar total int64\n\tfilepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {\n\t\tif err != nil || info.IsDir() {\n\t\t\treturn nil\n\t\t}\n\t\ttotal += info.Size()\n\t\treturn nil\n\t})\n\treturn float64(total) / 1024.0 / 1024.0\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tjson.NewEncoder(w).Encode(v)\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/handler.go"
+          },
+          "timestamp": "2026-03-10T11:16:39.151Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/admin/handler.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:16:44.274Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 7: Update `hls/handler.go` and `hls/cleaner.go`",
+          "timestamp": "2026-03-10T11:16:46.984Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/handler.go",
+            "new_string": "// StreamStatusHandler returns a handler reporting whether the stream is live.\ntype LiveChecker interface {\n\tIsLive() bool\n}\n\n// QualityLister reports currently enabled quality names.\ntype QualityLister interface {\n\tEnabledQualities() []string\n}\n\nfunc (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister) http.HandlerFunc {\n\treturn func(w http.ResponseWriter, r *http.Request) {\n\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n\t\tjson.NewEncoder(w).Encode(map[string]any{\n\t\t\t\"live\":      lc.IsLive(),\n\t\t\t\"qualities\": ql.EnabledQualities(),\n\t\t})\n\t}\n}",
+            "old_string": "// StreamStatusHandler returns a handler reporting whether the stream is live.\ntype LiveChecker interface {\n\tIsLive() bool\n}\n\nfunc (h *Handler) StreamStatusHandler(lc LiveChecker) http.HandlerFunc {\n\treturn func(w http.ResponseWriter, r *http.Request) {\n\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n\t\tjson.NewEncoder(w).Encode(map[string]any{\n\t\t\t\"live\":      lc.IsLive(),\n\t\t\t\"qualities\": []string{\"720p\", \"480p\", \"360p\"},\n\t\t})\n\t}\n}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-10T11:16:51.272Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/handler.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:16:56.344Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now update the cleaner to scan subdirs dynamically:",
+          "timestamp": "2026-03-10T11:16:59.308Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/cleaner.go",
+            "new_string": "func cleanSegments(hlsDir string, maxAge time.Duration) {\n\t// Scan subdirectories dynamically instead of hardcoding quality names\n\tsubdirs, err := os.ReadDir(hlsDir)\n\tif err != nil {\n\t\treturn\n\t}\n\tcutoff := time.Now().Add(-maxAge)\n\tfor _, sub := range subdirs {\n\t\tif !sub.IsDir() {\n\t\t\tcontinue\n\t\t}\n\t\tdir := filepath.Join(hlsDir, sub.Name())",
+            "old_string": "func cleanSegments(hlsDir string, maxAge time.Duration) {\n\tvariants := []string{\"720p\", \"480p\", \"360p\"}\n\tcutoff := time.Now().Add(-maxAge)\n\tfor _, v := range variants {\n\t\tdir := filepath.Join(hlsDir, v)",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-10T11:17:01.873Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/twitch-desent/internal/hls/cleaner.go has been updated successfully.",
+          "timestamp": "2026-03-10T11:17:07.025Z"
+        },
+        {
+          "type": "assistant",
+          "text": "### Step 8: Update `cmd/server/main.go`",
+          "timestamp": "2026-03-10T11:17:09.977Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package main\n\nimport (\n\t\"context\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"path/filepath\"\n\t\"strings\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"twitch-desent/internal/admin\"\n\t\"twitch-desent/internal/auth\"\n\t\"twitch-desent/internal/chat\"\n\t\"twitch-desent/internal/config\"\n\t\"twitch-desent/internal/db\"\n\t\"twitch-desent/internal/hls\"\n\t\"twitch-desent/internal/ingest\"\n)\n\nfunc corsMiddleware(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tw.Header().Set(\"Access-Control-Allow-Origin\", \"*\")\n\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"GET, POST, PUT, DELETE, OPTIONS\")\n\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Content-Type, Authorization\")\n\n\t\tif r.Method == http.MethodOptions {\n\t\t\tw.WriteHeader(http.StatusNoContent)\n\t\t\treturn\n\t\t}\n\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\nfunc main() {\n\tslog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{\n\t\tLevel: slog.LevelDebug,\n\t})))\n\n\tcfg := config.Load()\n\tif cfg.JWTSecret == \"\" {\n\t\tslog.Error(\"JWT_SECRET environment variable is required\")\n\t\tos.Exit(1)\n\t}\n\n\t// Database\n\tdatabase, err := db.Open(cfg.DBPath)\n\tif err != nil {\n\t\tslog.Error(\"failed to open database\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n\tdefer database.Close()\n\n\tif err := db.Migrate(database); err != nil {\n\t\tslog.Error(\"failed to run migrations\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n\tslog.Info(\"database ready\", \"path\", cfg.DBPath)\n\n\t// HLS directories — create for ALL quality presets\n\tfor _, q := range ingest.AllQualities {\n\t\tdir := filepath.Join(cfg.HLSDir, q.Name)\n\t\tif err := os.MkdirAll(dir, 0755); err != nil {\n\t\t\tslog.Error(\"failed to create HLS dir\", \"path\", dir, \"err\", err)\n\t\t\tos.Exit(1)\n\t\t}\n\t}\n\n\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\n\t// Ingest (FFmpeg subprocess)\n\tingestMgr := ingest.NewManager(ingest.Config{\n\t\tFFmpegPath: cfg.FFmpegPath,\n\t\tRTMPAddr:   cfg.RTMPAddr,\n\t\tStreamKey:  cfg.StreamKey,\n\t\tHLSDir:     cfg.HLSDir,\n\t})\n\n\t// Load persisted qualities from DB\n\tadminStore := admin.NewStore(database)\n\tif settings, err := adminStore.GetSettings(ctx); err == nil {\n\t\tif v, ok := settings[\"qualities_enabled\"]; ok && v != \"\" {\n\t\t\tnames := strings.Split(v, \",\")\n\t\t\tingestMgr.SetQualities(names)\n\t\t\tslog.Info(\"loaded persisted qualities\", \"qualities\", names)\n\t\t}\n\t}\n\n\tgo ingestMgr.Run(ctx)\n\n\t// HLS segment cleaner\n\thls.StartCleaner(ctx, cfg.HLSDir, 30*time.Second, 60*time.Second)\n\n\t// Routes\n\tmux := http.NewServeMux()\n\n\tmux.HandleFunc(\"GET /health\", func(w http.ResponseWriter, r *http.Request) {\n\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n\t\tw.Write([]byte(`{\"status\":\"ok\"}`))\n\t})\n\n\t// Auth\n\tauthStore := auth.NewStore(database)\n\ttokenService := auth.NewTokenService(cfg.JWTSecret)\n\tauthHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost)\n\tauthHandler.RegisterRoutes(mux)\n\n\t// Chat\n\tchatStore := chat.NewStore(database)\n\tchatHub := chat.NewHub(chatStore, ingestMgr)\n\tgo chatHub.Run(ctx)\n\n\tchatHandler := chat.NewHandler(chatHub, chatStore, tokenService, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)\n\tchatHandler.RegisterRoutes(mux)\n\n\t// HLS streaming\n\thlsHandler := hls.NewHandler(cfg.HLSDir)\n\thlsHandler.RegisterRoutes(mux)\n\tmux.HandleFunc(\"GET /api/stream/status\", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr))\n\n\t// Admin API\n\tadminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps)\n\tadminMW := func(h http.Handler) http.Handler {\n\t\treturn auth.RequireAuth(tokenService)(auth.RequireAdmin(h))\n\t}\n\tadminHandler.RegisterRoutes(mux, adminMW)\n\n\t// Static files (test player)\n\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"./static\"))))\n\n\tsrv := &http.Server{\n\t\tAddr:              cfg.HTTPAddr,\n\t\tHandler:           corsMiddleware(mux),\n\t\tReadHeaderTimeout: 10 * time.Second,\n\t\tWriteTimeout:      30 * time.Second,\n\t\tIdleTimeout:       120 * time.Second,\n\t}\n\n\tgo func() {\n\t\tslog.Info(\"HTTP server listening\", \"addr\", cfg.HTTPAddr)\n\t\tif err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n\t\t\tslog.Error(\"HTTP server error\", \"err\", err)\n\t\t\tos.Exit(1)\n\t\t}\n\t}()\n\n\t<-ctx.Done()\n\tslog.Info(\"shutdown signal received\")\n\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)\n\tdefer cancel()\n\n\tif err := srv.Shutdown(shutdownCtx); err != nil {\n\t\tslog.Error(\"HTTP shutdown error\", \"err\", err)\n\t}\n\tslog.Info(\"server stopped\")\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/twitch-desent/cmd/server/main.go"
+          },
+          "timestamp": "2026-03-10T11:17:28.982Z"
+        }
+      ],
+      "total_additions": 2778,
+      "total_deletions": 275,
+      "accepted_lines": 924,
+      "overriden_lines": 0
+    }
+  }
+}

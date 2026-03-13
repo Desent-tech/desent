@@ -1,0 +1,18 @@
+cmd/server/main.go
+  4c0de5e 14
+  a8b903b 16
+internal/admin/handler.go
+  4c0de5e 15
+  613902e 16
+internal/admin/store.go
+  4c0de5e 7
+internal/chat/handler.go
+  a8b903b 11
+internal/chat/store.go
+  a8b903b 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "base_commit_sha": "64fafcf99454a63a1f1b20c7e7944346162d8aa7",
+  "prompts": {}
+}

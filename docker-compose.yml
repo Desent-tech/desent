@@ -1,0 +1,32 @@
+services:
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+      - "1935:1935"
+    environment:
+      - JWT_SECRET=dev-secret-change-me
+      - STREAM_KEY=live
+      - DB_PATH=/data/desent.db
+      - HLS_DIR=/tmp/hls
+      - HTTP_ADDR=:8080
+      - RTMP_ADDR=0.0.0.0:1935
+      - LOG_LEVEL=info
+    volumes:
+      - db-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web/desent
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  db-data:

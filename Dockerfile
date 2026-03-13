@@ -1,10 +1,12 @@
 FROM golang:1.24-alpine AS builder
 
+ARG VERSION=dev
+
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -ldflags="-s -w" -o /server ./cmd/server
+RUN go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
 
 FROM alpine:3.21
 

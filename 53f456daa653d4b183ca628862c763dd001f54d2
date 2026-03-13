@@ -1,0 +1,10 @@
+README.md
+  98e8ab9 122,246
+deploy.sh
+  06d5cb5 223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "base_commit_sha": "0a9cb12fc1534bf586af7bf98538073aa4c8ec0c",
+  "prompts": {}
+}

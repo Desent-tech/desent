@@ -1,0 +1,43 @@
+# Binaries
+desent-server
+server
+*.exe
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# HLS segments (runtime)
+/tmp/hls/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+
+# Go
+vendor/
+
+# Web (Next.js / Turborepo)
+node_modules/
+.pnp
+.pnp.js
+.next/
+out/
+build/
+dist/
+.turbo/
+.vercel/
+coverage/
+npm-debug.log*
+*.pem
+CLAUDE.md

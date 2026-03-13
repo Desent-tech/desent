@@ -144,12 +144,12 @@ export default function AdminSettingsPage() {
             {PRESET_INFO[qualities.preset] && (
               <p className="text-xs text-muted-foreground mt-3">
                 {qualities.preset === "auto" ? (
-                  PRESET_INFO.auto.quality
+                  PRESET_INFO["auto"]?.quality
                 ) : (
                   <>
-                    <span className="text-foreground font-medium">{PRESET_INFO[qualities.preset].cpu}</span>
+                    <span className="text-foreground font-medium">{PRESET_INFO[qualities.preset]?.cpu}</span>
                     {" — "}
-                    {PRESET_INFO[qualities.preset].quality}
+                    {PRESET_INFO[qualities.preset]?.quality}
                   </>
                 )}
               </p>

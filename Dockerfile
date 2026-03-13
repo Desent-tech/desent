@@ -11,7 +11,6 @@ FROM alpine:3.21
 RUN apk add --no-cache ffmpeg
 
 COPY --from=builder /server /server
-COPY static/ /app/static/
 
 WORKDIR /app
 

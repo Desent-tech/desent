@@ -82,7 +82,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     Promise.all([
-      api.getStreamStatus().catch(() => ({ live: false, qualities: [], fps: {} }) as StreamStatus),
+      api.getStreamStatus().catch(() => ({ title: "", live: false, qualities: [], fps: {} }) as StreamStatus),
       api.getAdminUsers().catch((err) => {
         if (isUnauthorized(err)) handleAuthError()
         return [] as UserInfo[]

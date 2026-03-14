@@ -3,8 +3,16 @@ set -euo pipefail
 
 DOCKER_USER="${DOCKER_USER:?Set DOCKER_USER env var (your Docker Hub username)}"
 
-# Get version from git tag
-VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+# Get version from exact git tag on HEAD
+VERSION=$(git describe --tags --exact-match 2>/dev/null || true)
+
+if [[ -z "$VERSION" ]]; then
+    echo "Error: HEAD is not tagged. Tag it first:"
+    echo "  git tag v1.0.0"
+    echo "  DOCKER_USER=${DOCKER_USER} ./build.sh"
+    exit 1
+fi
+
 VERSION="${VERSION#v}" # strip leading 'v' → 1.0.0
 
 echo "Building version: ${VERSION}"

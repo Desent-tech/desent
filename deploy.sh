@@ -375,7 +375,7 @@ main() {
     printf "  ${BOLD}How do you SSH into the server?${RESET}\n"
     printf "  ${DIM}Example: ssh root@1.2.3.4${RESET}\n\n"
 
-    read -rp "  > " SSH_INPUT
+    read -rp "  > " SSH_INPUT < /dev/tty
     [[ -z "$SSH_INPUT" ]] && fatal "SSH command is required"
 
     # Normalize: add "ssh" prefix if user just typed "root@1.2.3.4"

@@ -13,7 +13,7 @@ TICK="✓"
 CROSS="✗"
 SPINNER_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
-TOTAL_STEPS=6
+TOTAL_STEPS=5
 CURRENT_STEP=0
 LOG_FILE="/tmp/deploy-desent-$$.log"
 DEPLOY_KEY=~/.ssh/desent_deploy
@@ -218,28 +218,19 @@ echo "Docker is ready."
 SCRIPT
 }
 
-do_resolve_version() {
-    echo "Fetching latest release tag from GitHub..."
-
-    # Use GitHub API to get the latest tag (sorted by semver)
+resolve_version() {
+    # Use GitHub API to get the latest tag
     DEPLOY_VERSION=$(curl -sf "https://api.github.com/repos/${GITHUB_REPO}/tags?per_page=1" \
         | grep '"name"' | head -1 | sed 's/.*"name": *"//;s/".*//')
 
     if [[ -z "$DEPLOY_VERSION" ]]; then
-        echo "ERROR: Could not fetch tags from GitHub."
-        echo "Falling back to 'latest'."
         DEPLOY_VERSION="latest"
     else
-        # Strip 'v' prefix for Docker tag
         DEPLOY_VERSION="${DEPLOY_VERSION#v}"
-        echo "Latest release: ${DEPLOY_VERSION}"
     fi
 
     SERVER_IMAGE="${DOCKER_USER}/desent-server:${DEPLOY_VERSION}"
     WEB_IMAGE="${DOCKER_USER}/desent-web:${DEPLOY_VERSION}"
-
-    echo "Server image: ${SERVER_IMAGE}"
-    echo "Web image:    ${WEB_IMAGE}"
 }
 
 do_pull_images() {
@@ -437,7 +428,10 @@ main() {
         step "Installing Docker"      do_install_docker
     fi
 
-    step "Resolving latest version"   do_resolve_version
+    # Resolve version in main shell (not in step subshell)
+    resolve_version
+    printf "  ${GREEN}${TICK}${RESET} Resolved version: ${BOLD}${DEPLOY_VERSION}${RESET}\n"
+
     step "Pulling images on server"   do_pull_images
     step "Generating config"          do_generate_config
     step "Deploying containers"       do_deploy

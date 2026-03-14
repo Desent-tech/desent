@@ -13,7 +13,7 @@ TICK="✓"
 CROSS="✗"
 SPINNER_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
-TOTAL_STEPS=7
+TOTAL_STEPS=6
 CURRENT_STEP=0
 LOG_FILE="/tmp/deploy-desent-$$.log"
 DEPLOY_KEY=~/.ssh/desent_deploy
@@ -128,11 +128,14 @@ step() {
     rm -f "$tmpout" "$rcfile"
 }
 
+# ─── Configuration ───────────────────────────────────────────────────
+GITHUB_REPO="Desent-tech/desent"
+DOCKER_USER="cracklybody"
+
 # ─── Prerequisite checks ────────────────────────────────────────────
 check_deps() {
-    if ! command -v docker &>/dev/null; then
-        printf "  ${RED}${BOLD}Missing dependency:${RESET} docker\n\n"
-        printf "  Install Docker: https://docs.docker.com/get-docker/\n\n"
+    if ! command -v curl &>/dev/null; then
+        printf "  ${RED}${BOLD}Missing dependency:${RESET} curl\n\n"
         exit 1
     fi
 }
@@ -215,49 +218,41 @@ echo "Docker is ready."
 SCRIPT
 }
 
-do_build_images() {
-    echo "Building desent-server image..."
-    docker build --platform linux/amd64 -t desent-server .
+do_resolve_version() {
+    echo "Fetching latest release tag from GitHub..."
 
-    echo "Building desent-web image..."
-    docker build --platform linux/amd64 -t desent-web ./web/desent
+    # Use GitHub API to get the latest tag (sorted by semver)
+    DEPLOY_VERSION=$(curl -sf "https://api.github.com/repos/${GITHUB_REPO}/tags?per_page=1" \
+        | grep '"name"' | head -1 | sed 's/.*"name": *"//;s/".*//')
+
+    if [[ -z "$DEPLOY_VERSION" ]]; then
+        echo "ERROR: Could not fetch tags from GitHub."
+        echo "Falling back to 'latest'."
+        DEPLOY_VERSION="latest"
+    else
+        # Strip 'v' prefix for Docker tag
+        DEPLOY_VERSION="${DEPLOY_VERSION#v}"
+        echo "Latest release: ${DEPLOY_VERSION}"
+    fi
+
+    SERVER_IMAGE="${DOCKER_USER}/desent-server:${DEPLOY_VERSION}"
+    WEB_IMAGE="${DOCKER_USER}/desent-web:${DEPLOY_VERSION}"
+
+    echo "Server image: ${SERVER_IMAGE}"
+    echo "Web image:    ${WEB_IMAGE}"
 }
 
-transfer_image() {
-    local name="$1"
+do_pull_images() {
+    remote bash -s <<SCRIPT
+set -e
+echo "Pulling ${SERVER_IMAGE}..."
+docker pull "${SERVER_IMAGE}"
 
-    echo "Saving ${name}..."
-    local tmptar="/tmp/deploy-${name}-$$.tar"
-    docker save "$name" -o "$tmptar"
+echo "Pulling ${WEB_IMAGE}..."
+docker pull "${WEB_IMAGE}"
 
-    local tar_bytes
-    tar_bytes=$(stat -f%z "$tmptar" 2>/dev/null || stat -c%s "$tmptar" 2>/dev/null)
-    local tar_mb=$(( tar_bytes / 1024 / 1024 ))
-
-    echo "Uploading ${name} (${tar_mb}MB)..."
-
-    # Pipe in 4MB chunks, report progress to stderr (shows in step log)
-    local bs=4194304
-    local blocks=$(( (tar_bytes + bs - 1) / bs ))
-    local i=0
-
-    (
-        while [[ $i -lt $blocks ]]; do
-            dd if="$tmptar" bs=$bs skip=$i count=1 2>/dev/null
-            i=$((i + 1))
-            local pct=$((i * 100 / blocks))
-            [[ $pct -gt 100 ]] && pct=100
-            echo "  ${name}: ${pct}% ($((i * bs / 1024 / 1024))/${tar_mb}MB)" >&2
-        done
-    ) | $SSH_CMD "docker load"
-
-    rm -f "$tmptar"
-    echo "${name} loaded."
-}
-
-do_transfer_images() {
-    transfer_image "desent-server"
-    transfer_image "desent-web"
+echo "Images pulled."
+SCRIPT
 }
 
 do_generate_config() {
@@ -279,7 +274,7 @@ services:
     restart: unless-stopped
 
   server:
-    image: desent-server:latest
+    image: ${SERVER_IMAGE}
     labels:
       - traefik.enable=true
       - "traefik.http.routers.server.rule=PathPrefix(\`/api\`) || PathPrefix(\`/ws\`) || PathPrefix(\`/live\`) || PathPrefix(\`/health\`) || PathPrefix(\`/static\`)"
@@ -300,7 +295,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: desent-web:latest
+    image: ${WEB_IMAGE}
     labels:
       - traefik.enable=true
       - "traefik.http.routers.web.rule=PathPrefix(\`/\`)"
@@ -442,8 +437,8 @@ main() {
         step "Installing Docker"      do_install_docker
     fi
 
-    step "Building Docker images"     do_build_images
-    step "Transferring images"        do_transfer_images
+    step "Resolving latest version"   do_resolve_version
+    step "Pulling images on server"   do_pull_images
     step "Generating config"          do_generate_config
     step "Deploying containers"       do_deploy
     step "Verifying deployment"       do_verify

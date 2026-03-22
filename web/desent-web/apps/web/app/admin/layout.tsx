@@ -3,7 +3,7 @@
 import { useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { ChartBar, GearSix, Users, List, X } from "@phosphor-icons/react"
+import { ChartBar, GearSix, Users, List, X, ArrowsClockwise } from "@phosphor-icons/react"
 import { AdminGuard } from "@/components/admin-guard"
 import { useAuth } from "@/hooks/use-auth"
 
@@ -11,6 +11,7 @@ const navItems = [
   { href: "/admin", label: "dashboard", icon: ChartBar },
   { href: "/admin/settings", label: "settings", icon: GearSix },
   { href: "/admin/users", label: "users", icon: Users },
+  { href: "/admin/update", label: "update", icon: ArrowsClockwise },
 ]
 
 function Sidebar({ onClose }: { onClose?: () => void }) {

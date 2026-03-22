@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"desent/internal/hls"
 	"desent/internal/ingest"
 	"desent/internal/setup"
+	"desent/internal/update"
 )
 
 // Set via -ldflags at build time.
@@ -41,6 +44,12 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	// Handle update-self mode: a helper container uses this to recreate the server container.
+	if len(os.Args) > 1 && os.Args[1] == "update-self" {
+		runUpdateSelf()
+		return
+	}
+
 	cfg := config.Load()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -175,6 +184,18 @@ func main() {
 	}
 	adminHandler.RegisterRoutes(mux, adminMW)
 
+	// Update system
+	updater := update.NewUpdater(update.Config{
+		CurrentVersion: version,
+		GitHubRepo:     cfg.GitHubRepo,
+		ServerImage:    cfg.DockerServerImage,
+		WebImage:       cfg.DockerWebImage,
+		ComposeProject: cfg.ComposeProject,
+		DataDir:        cfg.DataDir,
+	})
+	updateHandler := update.NewHandler(updater, tokenService)
+	updateHandler.RegisterRoutes(mux, adminMW)
+
 	// Static files (test player)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 
@@ -204,4 +225,41 @@ func main() {
 		slog.Error("HTTP shutdown error", "err", err)
 	}
 	slog.Info("server stopped")
+}
+
+// runUpdateSelf is the helper mode: recreate the server container with a new image.
+// Launched by the main server as a short-lived helper container.
+func runUpdateSelf() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
+	fs := flag.NewFlagSet("update-self", flag.ExitOnError)
+	containerID := fs.String("container", "", "container ID to recreate")
+	newImage := fs.String("image", "", "new image to use")
+	containerName := fs.String("name", "", "container name (unused, for logging)")
+
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		slog.Error("update-self: parse flags", "err", err)
+		os.Exit(1)
+	}
+
+	if *containerID == "" || *newImage == "" {
+		fmt.Fprintf(os.Stderr, "usage: %s update-self --container ID --image IMAGE [--name NAME]\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	slog.Info("update-self: starting", "container", *containerID, "image", *newImage, "name", *containerName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	docker := update.NewDockerClient()
+
+	if err := update.RecreateContainer(ctx, docker, *containerID, *newImage); err != nil {
+		slog.Error("update-self: recreate failed", "err", err)
+		os.Exit(1)
+	}
+
+	slog.Info("update-self: server container recreated successfully")
 }

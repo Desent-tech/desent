@@ -88,3 +88,25 @@ export type SetupCompleteResponse = {
   token: string
   role: string
 }
+
+export type UpdateCheckResult = {
+  current_version: string
+  latest_version: string
+  update_available: boolean
+  release?: {
+    version: string
+    published_at: string
+    release_url: string
+    body: string
+  }
+  socket_available: boolean
+}
+
+export type UpdateProgress = {
+  phase: "idle" | "checking" | "downloading" | "applying" | "restarting" | "failed" | "complete"
+  percent: number
+  bytes_downloaded: number
+  bytes_total: number
+  message: string
+  error?: string
+}

@@ -22,6 +22,10 @@ type Config struct {
 	HLSCacheMB          int
 	LogLevel            string
 	DataDir             string
+	GitHubRepo          string
+	DockerServerImage   string
+	DockerWebImage      string
+	ComposeProject      string
 }
 
 func Load() *Config {
@@ -40,6 +44,10 @@ func Load() *Config {
 		HLSCacheMB:          getEnvInt("HLS_CACHE_MB", 128),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		DataDir:             getEnv("DATA_DIR", "./data"),
+		GitHubRepo:          getEnv("GITHUB_REPO", "Desent-tech/desent"),
+		DockerServerImage:   getEnv("DOCKER_SERVER_IMAGE", "desent/server"),
+		DockerWebImage:      getEnv("DOCKER_WEB_IMAGE", "desent/web"),
+		ComposeProject:      getEnv("COMPOSE_PROJECT", "desent"),
 	}
 }
 

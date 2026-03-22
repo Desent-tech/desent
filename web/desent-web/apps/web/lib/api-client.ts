@@ -9,6 +9,7 @@ import type {
   QualitiesConfig,
   SetupStatus,
   SetupCompleteResponse,
+  UpdateCheckResult,
 } from "./api-types"
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL
@@ -186,6 +187,45 @@ class ApiClient {
 
   getIconUrl(): string {
     return `${this.baseUrl}/api/icon`
+  }
+
+  // Update
+
+  checkForUpdate(): Promise<UpdateCheckResult> {
+    return this.get("/api/admin/update/check")
+  }
+
+  async applyUpdate(): Promise<void> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers["Authorization"] = `Bearer ${token}`
+
+    const res = await fetch(`${this.baseUrl}/api/admin/update/apply`, {
+      method: "POST",
+      headers,
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new ApiError(data.error || `request failed (${res.status})`, res.status)
+    }
+  }
+
+  subscribeUpdateProgress(onProgress: (data: import("./api-types").UpdateProgress) => void): EventSource {
+    const token = this.getToken()
+    const url = `${this.baseUrl}/api/admin/update/progress?token=${encodeURIComponent(token || "")}`
+    const es = new EventSource(url)
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        onProgress(data)
+      } catch { /* ignore parse errors */ }
+    }
+    return es
+  }
+
+  async getVersion(): Promise<{ version: string }> {
+    return this.get("/api/version")
   }
 
   async uploadIcon(icon: File): Promise<void> {

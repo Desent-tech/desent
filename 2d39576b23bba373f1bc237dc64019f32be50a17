@@ -1,0 +1,941 @@
+internal/update/docker.go
+  f9d4f90 1,3-14,16,18-21,23-26,28-38,40-47,49-56,58-65,67-76,78-84,86-89,91-94,96-98,100-106,108-120,122-124,126-128,130-136,138-141,143-147,149-152,154-158,160-163,165-169,171-192,194-195,197-203,205-207,209-212,214-218,220-223,225-230,232-237,239-243,245-248,250-255,257-260,262-265,267-271,273-279,281-286,288-292,294-299,301-305,307-312,314-317,319-322,324-328,330-334,336-339,341-346,348-353,355-359,361-367
+internal/update/updater.go
+  f9d4f90 1,3-14,16-24,26-27,29-37,39-47,49-55,57-64,66-77,79-87,89-104,106-113,115-118,120-129,131-136,138-143,145-151,153-161,163-166,168-174,176-180,182-190,192-195,197-200,202-203,205-210,212-219,221-224,226-227,229-238,240-245,247-249,251-256,258-268,270-271,273-291,293-310,312-313,315-319,321-326,328-329,331-335,337-341,343-345,347-351,353,355-370,372-381,383-387,389-392,394,396-402,404-411,413-421,423-430,432-433,435,437-440,442-445,447-463,465-475,477-491,493-507,509-511,513-524
+internal/update/handler.go
+  f9d4f90 1,3-7,9-10,12-16,18-24,26-33,35-43,45-51,53-56,58-62,64-65,67-84,86-90,92-95,97-98,100-114,116-120
+internal/config/config.go
+  f9d4f90 25-28,47-50
+cmd/server/main.go
+  f9d4f90 6-7,25,47-51,187-197,230-235,237-240,242-245,247-250,252,254-255,257,259-262,264-265
+docker-compose.yml
+  f9d4f90 17
+web/desent-web/apps/web/lib/api-types.ts
+  f9d4f90 92-103,105-112
+web/desent-web/apps/web/lib/api-client.ts
+  f9d4f90 12,192,194-196,198-201,203-206,208-212,214-225,227-229
+web/desent-web/apps/web/app/admin/layout.tsx
+  f9d4f90 6,14
+web/desent-web/apps/web/app/admin/update/page.tsx
+  f9d4f90 1,3-6,8,10-18,20-37,39-41,43-48,50-53,55-81,83-100,102-104,106-124,126-132,134-136,138-144,146-154,156-158,160-162,164-180,182-223,225-253,255-280,282-310,312-325,327-344
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "base_commit_sha": "b1eb7e2518730bc0e18fb8017dac18f099905ffd",
+  "prompts": {
+    "f9d4f90": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ff89ee16-a3e2-482d-a5f9-2e9798b049b5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "m.ovchinnikov <m.ovchinnikov@vk.team>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "Implement the following plan:\n\n# Self-Update System for Desent (Docker-Only)\n\n## Context\n\nDesent is a self-hosted streaming platform. Streamers deploy via Docker Compose (Go server + Next.js frontend). Currently, updating requires SSH and manual `docker compose pull && up`. Streamers need a one-click update from the admin web UI.\n\n**Release pipeline:** GitHub Releases (tags like `v1.2.3`) + Docker Hub images tagged with the same version.\n\n## Architecture Overview\n\n```\nAdmin clicks \"Update\" in UI\n    │\n    ▼\nGo server checks GitHub Releases API for latest tag\n    │\n    ▼\nGo server pulls new Docker images via Docker Engine API (Unix socket)\n    │\n    ▼\nGo server recreates web container (safe — server is still running)\n    │\n    ▼\nGo server launches a helper container (from current image, --update-self flag)\n    │\n    ▼\nHelper container recreates server container (stop old → create new → start new)\n    │\n    ▼\nNew server container starts with new version\n    │\n    ▼\nAdmin UI polls /api/version → detects new version → shows \"updated!\"\n```\n\n**Key insight:** The server can't recreate its own container (it gets killed when stopped). So it spawns a short-lived helper container that does the server-self-replacement. The helper uses the **current** server image (always available locally) with a special `update-self` CLI flag.\n\n**Zero additional dependencies:** Uses Docker Engine API via HTTP to Unix socket (`net/http` stdlib). No `docker` CLI needed in the image.\n\n## Files to Create\n\n### `internal/update/docker.go` — Docker Engine API client\n\nMinimal HTTP client that talks to Docker daemon via `/var/run/docker.sock`:\n\n```go\ntype dockerClient struct{ httpClient *http.Client }\n\nfunc newDockerClient() *dockerClient  // Uses net.Dial(\"unix\", socketPath) transport\n\n// Image operations\nfunc (c *dockerClient) PullImage(ctx, image, tag string, onProgress func(status string, current, total int64)) error\n// POST /images/create?fromImage=...&tag=... — streams JSON progress events\n\n// Container operations\nfunc (c *dockerClient) ListContainers(ctx, labels map[string]string) ([]ContainerSummary, error)\n// GET /containers/json?filters={\"label\":[\"com.docker.compose.service=web\"]}\n\nfunc (c *dockerClient) InspectContainer(ctx, id string) (*ContainerInspect, error)\n// GET /containers/{id}/json\n\nfunc (c *dockerClient) StopContainer(ctx, id string, timeoutSec int) error\n// POST /containers/{id}/stop?t=30\n\nfunc (c *dockerClient) RemoveContainer(ctx, id string) error\n// DELETE /containers/{id}\n\nfunc (c *dockerClient) CreateContainer(ctx, name string, body ContainerCreateBody) (string, error)\n// POST /containers/create?name=... — returns new container ID\n\nfunc (c *dockerClient) StartContainer(ctx, id string) error\n// POST /containers/{id}/start\n```\n\nResponse types (only the fields we need from Docker API):\n- `ContainerSummary` — Id, Names, Image, Labels, State\n- `ContainerInspect` — full container config (Config, HostConfig, NetworkSettings, Name)\n- `ContainerCreateBody` — mirrors Docker's create API (Image, Env, ExposedPorts, HostConfig with Binds/PortBindings/RestartPolicy, NetworkingConfig)\n\nDocker socket availability check: `SocketAvailable() bool` — stats `/var/run/docker.sock`.\n\n### `internal/update/updater.go` — Core update logic\n\n```go\ntype Config struct {\n    CurrentVersion string // from ldflags\n    GitHubRepo     string // \"Desent-tech/desent\"\n    DataDir        string // for staging\n    ServerImage    string // Docker Hub: \"desent/server\"\n    WebImage       string // Docker Hub: \"desent/web\"\n    ComposeProject string // compose project name for label filtering\n}\n\ntype Updater struct {\n    cfg         Config\n    docker      *dockerClient\n    mu          sync.Mutex\n    updating    bool\n    progress    Progress\n    subscribers map[chan Progress]struct{}\n    cachedCheck *UpdateCheckResult\n    cacheExpiry time.Time\n}\n\ntype ProgressPhase string // idle|checking|downloading|applying|restarting|failed|complete\n\ntype Progress struct {\n    Phase           ProgressPhase `json:\"phase\"`\n    Percent         int           `json:\"percent\"`\n    BytesDownloaded int64         `json:\"bytes_downloaded\"`\n    BytesTotal      int64         `json:\"bytes_total\"`\n    Message         string        `json:\"message\"`\n    Error           string        `json:\"error,omitempty\"`\n}\n\ntype ReleaseInfo struct {\n    Version     string    `json:\"version\"`\n    PublishedAt time.Time `json:\"published_at\"`\n    ReleaseURL  string    `json:\"release_url\"`\n    Body        string    `json:\"body\"` // markdown changelog\n}\n\ntype UpdateCheckResult struct {\n    CurrentVersion  string       `json:\"current_version\"`\n    LatestVersion   string       `json:\"latest_version\"`\n    UpdateAvailable bool         `json:\"update_available\"`\n    Release         *ReleaseInfo `json:\"release,omitempty\"`\n    SocketAvailable bool         `json:\"socket_available\"`\n}\n```\n\n**Key methods:**\n\n`CheckForUpdate(ctx)` — Calls `GET https://api.github.com/repos/{owner}/{repo}/releases/latest`, compares semver tags, caches result for 5 minutes.\n\n`Apply(ctx)` — The main update flow (runs in background goroutine):\n1. **Phase: downloading** — Pull `ServerImage:newTag` and `WebImage:newTag` via Docker API with progress tracking\n2. **Phase: applying** — Recreate web container:\n   - Find web container by compose labels (`com.docker.compose.service=web`, `com.docker.compose.project=...`)\n   - Inspect → get full config\n   - Stop → Remove → Create (same config, new image) → Start\n3. **Phase: restarting** — Launch helper container:\n   - Get own container ID via `os.Hostname()`\n   - Inspect self → get current image name\n   - Create helper container from current image: `[\"/server\", \"update-self\", \"--container\", selfID, \"--image\", newServerImage+\":\"+newTag, \"--name\", selfName]`\n   - Mount Docker socket into helper, set `AutoRemove: true`\n   - Start helper container\n   - Send \"restarting\" progress to admin\n   - The main server keeps running until the helper stops it\n\n`RecreateContainer(docker, containerID, newImage)` — Reusable function used for both web (by main server) and server (by helper):\n1. Inspect container → save config\n2. Stop container (30s graceful timeout)\n3. Remove container\n4. Create new container with: same name, same env vars, same ports, same volumes, same networks, same restart policy — but new image\n5. Start new container\n6. If any step fails after stop, attempt rollback (recreate from old image)\n\n### `internal/update/handler.go` — HTTP endpoints\n\n```go\ntype Handler struct {\n    updater      *Updater\n    tokenService TokenValidator // interface for JWT validation\n}\n\nfunc (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {\n    mux.Handle(\"GET /api/admin/update/check\", mw(http.HandlerFunc(h.checkUpdate)))\n    mux.Handle(\"POST /api/admin/update/apply\", mw(http.HandlerFunc(h.applyUpdate)))\n    // SSE uses query-param auth (EventSource can't set headers)\n    mux.HandleFunc(\"GET /api/admin/update/progress\", h.streamProgress)\n}\n```\n\n- `checkUpdate` — Returns `UpdateCheckResult` JSON\n- `applyUpdate` — If socket unavailable: 503 with error. If already updating: 409. Otherwise: starts background goroutine, returns 202\n- `streamProgress` — SSE with `?token=JWT` auth (validated manually, same pattern as WebSocket chat). Streams `Progress` JSON events. Sends current state immediately on connect.\n\n### `cmd/server/main.go` — update-self mode + wiring\n\nAdd early check before normal startup:\n```go\nfunc main() {\n    if len(os.Args) > 1 && os.Args[1] == \"update-self\" {\n        // Parse flags: --container, --image, --name\n        // Run RecreateContainer() using Docker API\n        // Exit 0 on success, 1 on failure\n        return\n    }\n    // ... existing startup code ...\n}\n```\n\nWire update handler after admin handler:\n```go\nupdater := update.NewUpdater(update.Config{\n    CurrentVersion: version,\n    GitHubRepo:     cfg.GitHubRepo,\n    ServerImage:    cfg.DockerServerImage,\n    WebImage:       cfg.DockerWebImage,\n    ComposeProject: cfg.ComposeProject,\n    DataDir:        cfg.DataDir,\n})\nupdateHandler := update.NewHandler(updater, tokenService)\nupdateHandler.RegisterRoutes(mux, adminMW)\n```\n\n## Files to Modify\n\n### `internal/config/config.go`\n\nAdd fields:\n```go\nGitHubRepo        string // GITHUB_REPO, default \"Desent-tech/desent\"\nDockerServerImage string // DOCKER_SERVER_IMAGE, default \"desent/server\"\nDockerWebImage    string // DOCKER_WEB_IMAGE, default \"desent/web\"\nComposeProject    string // COMPOSE_PROJECT, default \"desent\"\n```\n\n### `Dockerfile`\n\nNo changes needed — we don't need docker CLI since we use the Docker Engine API directly via HTTP.\n\n### `docker-compose.yml`\n\nAdd Docker socket mount to server service:\n```yaml\nserver:\n  image: ${DOCKER_SERVER_IMAGE:-desent/server}:${DESENT_VERSION:-latest}\n  volumes:\n    - /var/run/docker.sock:/var/run/docker.sock\n    - db-data:/data\n    - ./data:/app/data\n  # ... rest unchanged\n\nweb:\n  image: ${DOCKER_WEB_IMAGE:-desent/web}:${DESENT_VERSION:-latest}\n  # ... rest unchanged\n```\n\nProduction deployments use `image:` instead of `build:`. The socket mount is required for the update feature.\n\n### Frontend: `web/desent-web/apps/web/lib/api-types.ts`\n\nAdd:\n```typescript\nexport type UpdateCheckResult = {\n  current_version: string\n  latest_version: string\n  update_available: boolean\n  release?: {\n    version: string\n    published_at: string\n    release_url: string\n    body: string\n  }\n  socket_available: boolean\n}\n\nexport type UpdateProgress = {\n  phase: \"idle\" | \"checking\" | \"downloading\" | \"applying\" | \"restarting\" | \"failed\" | \"complete\"\n  percent: number\n  bytes_downloaded: number\n  bytes_total: number\n  message: string\n  error?: string\n}\n```\n\n### Frontend: `web/desent-web/apps/web/lib/api-client.ts`\n\nAdd methods:\n```typescript\ncheckForUpdate(): Promise<UpdateCheckResult>\napplyUpdate(): Promise<void>   // handles 202/409/503\nsubscribeUpdateProgress(onProgress): EventSource  // SSE with ?token= auth\n```\n\n### Frontend: `web/desent-web/apps/web/app/admin/layout.tsx`\n\nAdd nav item: `{ href: \"/admin/update\", label: \"update\", icon: ArrowsClockwise }`\n\n### Frontend: New file `web/desent-web/apps/web/app/admin/update/page.tsx`\n\nStates:\n1. **Loading** — checking on mount\n2. **Up to date** — current version, \"check again\" button\n3. **Update available** — version, changelog, \"update now\" with confirmation dialog\n4. **No socket** — Docker socket not mounted, shows instructions to mount it\n5. **Updating** — progress bar with phase labels, download progress\n6. **Restarting** — \"server is restarting...\" with polling loop on `/api/version` every 2s\n7. **Error** — error message with retry button\n\nAuto-reconnect after restart: poll `GET /api/version` up to 30 times (60s), compare response version with expected new version, reload page on match.\n\nUses same card styling as other admin pages (`bg-secondary rounded-2xl p-5`).\n\n## Safety\n\n- **Docker socket check**: If `/var/run/docker.sock` not available, update check still works but apply returns 503 with clear error\n- **Container recreation rollback**: If creating new container fails after removing old one, attempt to recreate from old image\n- **Concurrency guard**: Mutex prevents parallel updates\n- **Checksum**: Version comparison uses semver (no arbitrary code execution)\n- **Graceful stop**: 30s timeout for container stop (matches existing SIGTERM handling)\n- **Helper auto-cleanup**: Helper container uses AutoRemove — Docker removes it after exit\n- **GitHub rate limit**: 60 req/hour unauthenticated, 5-min cache prevents excessive calls\n\n## Implementation Order\n\n1. `internal/update/docker.go` — Docker Engine API client\n2. `internal/update/updater.go` — Check + Apply + RecreateContainer logic\n3. `internal/update/handler.go` — HTTP endpoints + SSE\n4. `internal/config/config.go` — add 4 config fields\n5. `cmd/server/main.go` — update-self mode + wiring\n6. `docker-compose.yml` — add socket mount, switch to `image:` for production\n7. `api-types.ts` — TypeScript types\n8. `api-client.ts` — API methods\n9. `app/admin/layout.tsx` — nav item\n10. `app/admin/update/page.tsx` — update page UI\n\n## Verification\n\n1. Build with `-X main.version=0.0.1` to simulate old version\n2. Set `GITHUB_REPO=Desent-tech/desent` (or any public repo with releases)\n3. Verify `GET /api/admin/update/check` returns update info\n4. Verify SSE: `curl -N \"localhost:8080/api/admin/update/progress?token=JWT\"`\n5. Test without socket: verify 503 response with clear error\n6. Test full update flow with Docker Compose (requires published images on Docker Hub)\n7. Test error cases: no releases, rate limited, network error, container recreation failure\n\n\nIf you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/m.ovchinnikov/.claude/projects/-Users-m-ovchinnikov-GolandProjects-desent/3e692d64-f3b4-496e-a337-aef8b25ea0f0.jsonl",
+          "timestamp": "2026-03-22T10:55:29.552Z"
+        },
+        {
+          "type": "assistant",
+          "text": "I'll start by exploring the existing codebase to understand the current patterns, then implement all the files. Let me kick off parallel exploration tasks.",
+          "timestamp": "2026-03-22T10:55:37.858Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Task",
+          "input": {
+            "description": "Explore Go backend structure",
+            "prompt": "Explore the Go backend codebase to understand patterns for implementing a new `internal/update` package. I need to understand:\n\n1. Read `cmd/server/main.go` - how modules are wired, how version is set via ldflags\n2. Read `internal/config/config.go` - how config fields are defined and loaded\n3. Read `internal/admin/handler.go` - how admin routes are registered and middleware applied\n4. Read `internal/auth/jwt.go` and `internal/auth/middleware.go` - how JWT validation works and the TokenService/Claims types\n5. Read `internal/chat/handler.go` - how WebSocket auth works with query param tokens (we need same pattern for SSE)\n6. Read `docker-compose.yml` and `Dockerfile`\n7. Read `go.mod` for current dependencies\n\nReturn the FULL contents of each file - I need exact code to understand patterns.",
+            "subagent_type": "Explore"
+          },
+          "timestamp": "2026-03-22T10:55:43.933Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Task",
+          "input": {
+            "description": "Explore frontend structure",
+            "prompt": "Explore the frontend codebase to understand patterns for implementing the update admin page. I need to understand:\n\n1. Read `web/desent-web/apps/web/lib/api-types.ts` - existing TypeScript types\n2. Read `web/desent-web/apps/web/lib/api-client.ts` - how API client methods are structured\n3. Read `web/desent-web/apps/web/app/admin/layout.tsx` - admin nav structure, icons used\n4. Read any existing admin page (e.g. `web/desent-web/apps/web/app/admin/settings/page.tsx` or similar) - to understand page styling patterns\n5. Check what UI components are available (look in `web/desent-web/` for component libraries, shadcn, etc.)\n6. Read `web/desent-web/apps/web/app/admin/page.tsx` if it exists\n\nReturn the FULL contents of each file found.",
+            "subagent_type": "Explore"
+          },
+          "timestamp": "2026-03-22T10:55:47.505Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now let me read the exact files I need to modify.",
+          "timestamp": "2026-03-22T10:56:42.914Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/config/config.go"
+          },
+          "timestamp": "2026-03-22T10:56:43.460Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go"
+          },
+          "timestamp": "2026-03-22T10:56:43.858Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/docker-compose.yml"
+          },
+          "timestamp": "2026-03-22T10:56:44.305Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-types.ts"
+          },
+          "timestamp": "2026-03-22T10:56:44.751Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-client.ts"
+          },
+          "timestamp": "2026-03-22T10:56:45.640Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/layout.tsx"
+          },
+          "timestamp": "2026-03-22T10:56:46.111Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/auth/jwt.go"
+          },
+          "timestamp": "2026-03-22T10:56:46.603Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/admin/handler.go"
+          },
+          "timestamp": "2026-03-22T10:56:46.815Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package config\n     2→\n     3→import (\n     4→\t\"log/slog\"\n     5→\t\"os\"\n     6→\t\"strconv\"\n     7→\t\"strings\"\n     8→)\n     9→\n    10→type Config struct {\n    11→\tHTTPAddr            string\n    12→\tDBPath              string\n    13→\tJWTSecret           string\n    14→\tBcryptCost          int\n    15→\tStreamKey           string\n    16→\tHLSDir              string\n    17→\tRTMPAddr            string\n    18→\tFFmpegPath          string\n    19→\tChatMaxMsgLen       int\n    20→\tChatRateLimitMS     int\n    21→\tServerBandwidthMbps int\n    22→\tHLSCacheMB          int\n    23→\tLogLevel            string\n    24→\tDataDir             string\n    25→}\n    26→\n    27→func Load() *Config {\n    28→\treturn &Config{\n    29→\t\tHTTPAddr:            getEnv(\"HTTP_ADDR\", \":8080\"),\n    30→\t\tDBPath:              getEnv(\"DB_PATH\", \"./desent.db\"),\n    31→\t\tJWTSecret:           getEnv(\"JWT_SECRET\", \"\"),\n    32→\t\tBcryptCost:          getEnvInt(\"BCRYPT_COST\", 12),\n    33→\t\tStreamKey:           getEnv(\"STREAM_KEY\", \"live\"),\n    34→\t\tHLSDir:              getEnv(\"HLS_DIR\", \"/tmp/hls\"),\n    35→\t\tRTMPAddr:            getEnv(\"RTMP_ADDR\", \"0.0.0.0:1935\"),\n    36→\t\tFFmpegPath:          getEnv(\"FFMPEG_PATH\", \"ffmpeg\"),\n    37→\t\tChatMaxMsgLen:       getEnvInt(\"CHAT_MAX_MSG_LEN\", 500),\n    38→\t\tChatRateLimitMS:     getEnvInt(\"CHAT_RATE_LIMIT_MS\", 500),\n    39→\t\tServerBandwidthMbps: getEnvInt(\"SERVER_BANDWIDTH_MBPS\", 100),\n    40→\t\tHLSCacheMB:          getEnvInt(\"HLS_CACHE_MB\", 128),\n    41→\t\tLogLevel:            getEnv(\"LOG_LEVEL\", \"info\"),\n    42→\t\tDataDir:             getEnv(\"DATA_DIR\", \"./data\"),\n    43→\t}\n    44→}\n    45→\n    46→// ParseLogLevel converts a log level string to slog.Level.\n    47→// Supported values: debug, info, warn, error. Defaults to info.\n    48→func ParseLogLevel(s string) slog.Level {\n    49→\tswitch strings.ToLower(s) {\n    50→\tcase \"debug\":\n    51→\t\treturn slog.LevelDebug\n    52→\tcase \"warn\", \"warning\":\n    53→\t\treturn slog.LevelWarn\n    54→\tcase \"error\":\n    55→\t\treturn slog.LevelError\n    56→\tdefault:\n    57→\t\treturn slog.LevelInfo\n    58→\t}\n    59→}\n    60→\n    61→func getEnv(key, fallback string) string {\n    62→\tif v := os.Getenv(key); v != \"\" {\n    63→\t\treturn v\n    64→\t}\n    65→\treturn fallback\n    66→}\n    67→\n    68→func getEnvInt(key string, fallback int) int {\n    69→\tif v := os.Getenv(key); v != \"\" {\n    70→\t\tif n, err := strconv.Atoi(v); err == nil {\n    71→\t\t\treturn n\n    72→\t\t}\n    73→\t}\n    74→\treturn fallback\n    75→}\n    76→",
+          "timestamp": "2026-03-22T10:56:46.852Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→export type AuthResponse = {\n     2→  token: string\n     3→  role: string\n     4→}\n     5→\n     6→export type StreamStatus = {\n     7→  live: boolean\n     8→  qualities: string[]\n     9→  fps: Record<string, number>\n    10→  title: string\n    11→}\n    12→\n    13→export type ChatSession = {\n    14→  id: number\n    15→  title: string\n    16→  started_at: number\n    17→  ended_at: number | null\n    18→}\n    19→\n    20→export type ChatMessage = {\n    21→  id: number\n    22→  session_id: number\n    23→  user_id: number\n    24→  username: string\n    25→  message: string\n    26→  created_at: number\n    27→}\n    28→\n    29→export type ChatSessionsResponse = {\n    30→  sessions: ChatSession[]\n    31→}\n    32→\n    33→export type ChatHistoryResponse = {\n    34→  messages: ChatMessage[]\n    35→}\n    36→\n    37→export type WsChatMessage = {\n    38→  type: \"chat\" | \"system\"\n    39→  text: string\n    40→  user_id?: number\n    41→  username?: string\n    42→  timestamp: number\n    43→}\n    44→\n    45→export type AdminSettings = Record<string, string>\n    46→\n    47→export type UserInfo = {\n    48→  id: number\n    49→  username: string\n    50→  role: string\n    51→  created_at: number\n    52→  banned: boolean\n    53→  ban_reason?: string\n    54→}\n    55→\n    56→export type ServerStats = {\n    57→  uptime_seconds: number\n    58→  cpu_usage_percent: number\n    59→  cpu_cores: number\n    60→  mem_total_mb: number\n    61→  mem_used_mb: number\n    62→  mem_used_percent: number\n    63→  mem_go_alloc_mb: number\n    64→  num_goroutines: number\n    65→  hls_disk_usage_mb: number\n    66→  stream_live: boolean\n    67→  qualities: string[]\n    68→  bandwidth_mbps: number\n    69→  viewer_capacity: Record<string, number>\n    70→}\n    71→\n    72→export type QualitiesConfig = {\n    73→  enabled: string[]\n    74→  available: string[]\n    75→  fps: Record<string, number>\n    76→  preset: string\n    77→  available_presets: string[]\n    78→  auto_preset: string\n    79→  cpu_cores: number\n    80→  restarted?: boolean\n    81→}\n    82→\n    83→export type SetupStatus = {\n    84→  setup_required: boolean\n    85→}\n    86→\n    87→export type SetupCompleteResponse = {\n    88→  token: string\n    89→  role: string\n    90→}\n    91→",
+          "timestamp": "2026-03-22T10:56:46.854Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→services:\n     2→  server:\n     3→    build: .\n     4→    ports:\n     5→      - \"8080:8080\"\n     6→      - \"1935:1935\"\n     7→    environment:\n     8→      - JWT_SECRET=dev-secret-change-me\n     9→      - STREAM_KEY=live\n    10→      - DB_PATH=/data/desent.db\n    11→      - HLS_DIR=/tmp/hls\n    12→      - HTTP_ADDR=:8080\n    13→      - RTMP_ADDR=0.0.0.0:1935\n    14→      - LOG_LEVEL=info\n    15→      - DATA_DIR=/app/data\n    16→    volumes:\n    17→      - db-data:/data\n    18→      - ./data:/app/data\n    19→    restart: unless-stopped\n    20→\n    21→  web:\n    22→    build:\n    23→      context: ./web/desent-web\n    24→      dockerfile: Dockerfile\n    25→    ports:\n    26→      - \"3000:3000\"\n    27→    environment:\n    28→      - NEXT_PUBLIC_API_URL=http://localhost:8080\n    29→    depends_on:\n    30→      - server\n    31→    restart: unless-stopped\n    32→\n    33→volumes:\n    34→  db-data:\n    35→",
+          "timestamp": "2026-03-22T10:56:46.856Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→\"use client\"\n     2→\n     3→import { useState } from \"react\"\n     4→import Link from \"next/link\"\n     5→import { usePathname } from \"next/navigation\"\n     6→import { ChartBar, GearSix, Users, List, X } from \"@phosphor-icons/react\"\n     7→import { AdminGuard } from \"@/components/admin-guard\"\n     8→import { useAuth } from \"@/hooks/use-auth\"\n     9→\n    10→const navItems = [\n    11→  { href: \"/admin\", label: \"dashboard\", icon: ChartBar },\n    12→  { href: \"/admin/settings\", label: \"settings\", icon: GearSix },\n    13→  { href: \"/admin/users\", label: \"users\", icon: Users },\n    14→]\n    15→\n    16→function Sidebar({ onClose }: { onClose?: () => void }) {\n    17→  const pathname = usePathname()\n    18→  const { user } = useAuth()\n    19→\n    20→  return (\n    21→    <div className=\"flex flex-col h-full bg-sidebar text-sidebar-foreground\">\n    22→      <div className=\"px-5 py-4 border-b border-sidebar-border flex items-center justify-between\">\n    23→        <Link href=\"/admin\" className=\"font-bold text-sm tracking-tight\" onClick={onClose}>\n    24→          admin panel\n    25→        </Link>\n    26→        {onClose && (\n    27→          <button onClick={onClose} className=\"lg:hidden p-1\">\n    28→            <X size={18} />\n    29→          </button>\n    30→        )}\n    31→      </div>\n    32→      <nav className=\"flex-1 px-3 py-3 space-y-1\">\n    33→        {navItems.map((item) => {\n    34→          const active = pathname === item.href\n    35→          const Icon = item.icon\n    36→          return (\n    37→            <Link\n    38→              key={item.href}\n    39→              href={item.href}\n    40→              onClick={onClose}\n    41→              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-colors ${\n    42→                active\n    43→                  ? \"bg-sidebar-accent text-sidebar-accent-foreground font-semibold\"\n    44→                  : \"text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50\"\n    45→              }`}\n    46→            >\n    47→              <Icon size={18} weight={active ? \"fill\" : \"regular\"} />\n    48→              {item.label}\n    49→            </Link>\n    50→          )\n    51→        })}\n    52→      </nav>\n    53→      <div className=\"px-5 py-4 border-t border-sidebar-border space-y-2\">\n    54→        <p className=\"text-xs text-sidebar-foreground/50\">{user?.username}</p>\n    55→        <Link\n    56→          href=\"/\"\n    57→          className=\"text-xs text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors\"\n    58→        >\n    59→          back to stream\n    60→        </Link>\n    61→      </div>\n    62→    </div>\n    63→  )\n    64→}\n    65→\n    66→export default function AdminLayout({ children }: { children: React.ReactNode }) {\n    67→  const [sidebarOpen, setSidebarOpen] = useState(false)\n    68→\n    69→  return (\n    70→    <AdminGuard>\n    71→      <div className=\"min-h-screen bg-background flex\">\n    72→        {/* Desktop sidebar */}\n    73→        <div className=\"hidden lg:block w-64 border-r border-border shrink-0 fixed inset-y-0 left-0\">\n    74→          <Sidebar />\n    75→        </div>\n    76→\n    77→        {/* Mobile sidebar overlay */}\n    78→        {sidebarOpen && (\n    79→          <div className=\"lg:hidden fixed inset-0 z-50\">\n    80→            <div className=\"absolute inset-0 bg-black/50\" onClick={() => setSidebarOpen(false)} />\n    81→            <div className=\"relative w-64 h-full\">\n    82→              <Sidebar onClose={() => setSidebarOpen(false)} />\n    83→            </div>\n    84→          </div>\n    85→        )}\n    86→\n    87→        {/* Main content */}\n    88→        <div className=\"flex-1 lg:ml-64\">\n    89→          {/* Mobile header */}\n    90→          <div className=\"lg:hidden sticky top-0 z-40 h-14 bg-background/80 backdrop-blur-xl border-b border-border flex items-center px-3\">\n    91→            <button onClick={() => setSidebarOpen(true)} className=\"p-1\">\n    92→              <List size={22} />\n    93→            </button>\n    94→            <span className=\"ml-3 text-sm font-semibold\">admin</span>\n    95→          </div>\n    96→\n    97→          <main className=\"px-3 lg:px-5 py-6 max-w-5xl\">{children}</main>\n    98→        </div>\n    99→      </div>\n   100→    </AdminGuard>\n   101→  )\n   102→}\n   103→",
+          "timestamp": "2026-03-22T10:56:46.858Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package auth\n     2→\n     3→import (\n     4→\t\"errors\"\n     5→\t\"fmt\"\n     6→\t\"time\"\n     7→\n     8→\t\"github.com/golang-jwt/jwt/v5\"\n     9→)\n    10→\n    11→var ErrInvalidToken = errors.New(\"auth: invalid token\")\n    12→\n    13→type Claims struct {\n    14→\tUserID   int64  `json:\"user_id\"`\n    15→\tUsername string `json:\"username\"`\n    16→\tRole     string `json:\"role\"`\n    17→\tjwt.RegisteredClaims\n    18→}\n    19→\n    20→type TokenService struct {\n    21→\tsecret []byte\n    22→\tttl    time.Duration\n    23→}\n    24→\n    25→func NewTokenService(secret string) *TokenService {\n    26→\treturn &TokenService{\n    27→\t\tsecret: []byte(secret),\n    28→\t\tttl:    24 * time.Hour,\n    29→\t}\n    30→}\n    31→\n    32→func (t *TokenService) Generate(user *User) (string, error) {\n    33→\tnow := time.Now()\n    34→\tclaims := Claims{\n    35→\t\tUserID:   user.ID,\n    36→\t\tUsername: user.Username,\n    37→\t\tRole:     user.Role,\n    38→\t\tRegisteredClaims: jwt.RegisteredClaims{\n    39→\t\t\tExpiresAt: jwt.NewNumericDate(now.Add(t.ttl)),\n    40→\t\t\tIssuedAt:  jwt.NewNumericDate(now),\n    41→\t\t\tIssuer:    \"desent\",\n    42→\t\t},\n    43→\t}\n    44→\ttoken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)\n    45→\tsigned, err := token.SignedString(t.secret)\n    46→\tif err != nil {\n    47→\t\treturn \"\", fmt.Errorf(\"auth: sign token: %w\", err)\n    48→\t}\n    49→\treturn signed, nil\n    50→}\n    51→\n    52→func (t *TokenService) Validate(tokenStr string) (*Claims, error) {\n    53→\ttoken, err := jwt.ParseWithClaims(tokenStr, &Claims{},\n    54→\t\tfunc(token *jwt.Token) (any, error) {\n    55→\t\t\tif _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {\n    56→\t\t\t\treturn nil, fmt.Errorf(\"auth: unexpected signing method: %v\", token.Header[\"alg\"])\n    57→\t\t\t}\n    58→\t\t\treturn t.secret, nil\n    59→\t\t},\n    60→\t\tjwt.WithExpirationRequired(),\n    61→\t\tjwt.WithIssuedAt(),\n    62→\t)\n    63→\tif err != nil || !token.Valid {\n    64→\t\treturn nil, ErrInvalidToken\n    65→\t}\n    66→\tclaims, ok := token.Claims.(*Claims)\n    67→\tif !ok {\n    68→\t\treturn nil, ErrInvalidToken\n    69→\t}\n    70→\treturn claims, nil\n    71→}\n    72→",
+          "timestamp": "2026-03-22T10:56:46.860Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package admin\n     2→\n     3→import (\n     4→\t\"encoding/json\"\n     5→\t\"io\"\n     6→\t\"log/slog\"\n     7→\t\"math\"\n     8→\t\"net/http\"\n     9→\t\"os\"\n    10→\t\"path/filepath\"\n    11→\t\"runtime\"\n    12→\t\"strconv\"\n    13→\t\"strings\"\n    14→\t\"time\"\n    15→\n    16→\t\"desent/internal/auth\"\n    17→\t\"desent/internal/ingest\"\n    18→)\n    19→\n    20→// IngestManager is the subset of ingest.Manager used by admin endpoints.\n    21→type IngestManager interface {\n    22→\tIsLive() bool\n    23→\tEnabledQualities() []string\n    24→\tSetQualities(names []string)\n    25→\tFPSOverrides() map[string]int\n    26→\tSetFPSOverrides(overrides map[string]int)\n    27→\tGetPreset() string\n    28→\tSetPreset(p string)\n    29→\tResolvedPreset() string\n    30→\tRestart()\n    31→\tStartedAt() time.Time\n    32→}\n    33→\n    34→var allowedIconExts = []string{\".png\", \".jpg\", \".jpeg\", \".svg\", \".ico\"}\n    35→\n    36→type Handler struct {\n    37→\tstore     *Store\n    38→\tingestMgr IngestManager\n    39→\thlsDir    string\n    40→\tdefaultBW int\n    41→\tdataDir   string\n    42→}\n    43→\n    44→func NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int, dataDir string) *Handler {\n    45→\treturn &Handler{\n    46→\t\tstore:     store,\n    47→\t\tingestMgr: ingestMgr,\n    48→\t\thlsDir:    hlsDir,\n    49→\t\tdefaultBW: defaultBW,\n    50→\t\tdataDir:   dataDir,\n    51→\t}\n    52→}\n    53→\n    54→func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {\n    55→\tmux.Handle(\"GET /api/admin/settings\", mw(http.HandlerFunc(h.getSettings)))\n    56→\tmux.Handle(\"PUT /api/admin/settings\", mw(http.HandlerFunc(h.updateSettings)))\n    57→\tmux.Handle(\"GET /api/admin/users\", mw(http.HandlerFunc(h.listUsers)))\n    58→\tmux.Handle(\"POST /api/admin/ban\", mw(http.HandlerFunc(h.banUser)))\n    59→\tmux.Handle(\"DELETE /api/admin/ban/{userId}\", mw(http.HandlerFunc(h.unbanUser)))\n    60→\tmux.Handle(\"GET /api/admin/stats\", mw(http.HandlerFunc(h.getStats)))\n    61→\tmux.Handle(\"GET /api/admin/qualities\", mw(http.HandlerFunc(h.getQualities)))\n    62→\tmux.Handle(\"PUT /api/admin/qualities\", mw(http.HandlerFunc(h.updateQualities)))\n    63→\tmux.Handle(\"POST /api/admin/icon\", mw(http.HandlerFunc(h.uploadIcon)))\n    64→}\n    65→\n    66→func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {\n    67→\tsettings, err := h.store.GetSettings(r.Context())\n    68→\tif err != nil {\n    69→\t\tslog.Error(\"admin: get settings\", \"err\", err)\n    70→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    71→\t\treturn\n    72→\t}\n    73→\twriteJSON(w, http.StatusOK, settings)\n    74→}\n    75→\n    76→func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {\n    77→\tvar kv map[string]string\n    78→\tif err := json.NewDecoder(r.Body).Decode(&kv); err != nil {\n    79→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n    80→\t\treturn\n    81→\t}\n    82→\tif len(kv) == 0 {\n    83→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"empty payload\"})\n    84→\t\treturn\n    85→\t}\n    86→\n    87→\tif err := h.store.UpdateSettings(r.Context(), kv); err != nil {\n    88→\t\tslog.Error(\"admin: update settings\", \"err\", err)\n    89→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    90→\t\treturn\n    91→\t}\n    92→\n    93→\tsettings, err := h.store.GetSettings(r.Context())\n    94→\tif err != nil {\n    95→\t\tslog.Error(\"admin: get settings after update\", \"err\", err)\n    96→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n    97→\t\treturn\n    98→\t}\n    99→\twriteJSON(w, http.StatusOK, settings)\n   100→}\n   101→\n   102→func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {\n   103→\tusers, err := h.store.ListUsers(r.Context())\n   104→\tif err != nil {\n   105→\t\tslog.Error(\"admin: list users\", \"err\", err)\n   106→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   107→\t\treturn\n   108→\t}\n   109→\twriteJSON(w, http.StatusOK, users)\n   110→}\n   111→\n   112→type banRequest struct {\n   113→\tUserID int64  `json:\"user_id\"`\n   114→\tReason string `json:\"reason\"`\n   115→}\n   116→\n   117→func (h *Handler) banUser(w http.ResponseWriter, r *http.Request) {\n   118→\tvar req banRequest\n   119→\tif err := json.NewDecoder(r.Body).Decode(&req); err != nil {\n   120→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n   121→\t\treturn\n   122→\t}\n   123→\tif req.UserID == 0 {\n   124→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"user_id is required\"})\n   125→\t\treturn\n   126→\t}\n   127→\n   128→\tclaims := auth.ClaimsFromContext(r.Context())\n   129→\tif claims.UserID == req.UserID {\n   130→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"cannot ban yourself\"})\n   131→\t\treturn\n   132→\t}\n   133→\n   134→\tif err := h.store.BanUser(r.Context(), req.UserID, claims.UserID, req.Reason); err != nil {\n   135→\t\tif strings.Contains(err.Error(), \"UNIQUE constraint failed\") {\n   136→\t\t\twriteJSON(w, http.StatusConflict, map[string]string{\"error\": \"user already banned\"})\n   137→\t\t\treturn\n   138→\t\t}\n   139→\t\tslog.Error(\"admin: ban user\", \"err\", err)\n   140→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   141→\t\treturn\n   142→\t}\n   143→\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"banned\"})\n   144→}\n   145→\n   146→func (h *Handler) unbanUser(w http.ResponseWriter, r *http.Request) {\n   147→\tidStr := r.PathValue(\"userId\")\n   148→\tuserID, err := strconv.ParseInt(idStr, 10, 64)\n   149→\tif err != nil {\n   150→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid user ID\"})\n   151→\t\treturn\n   152→\t}\n   153→\n   154→\tif err := h.store.UnbanUser(r.Context(), userID); err != nil {\n   155→\t\tif strings.Contains(err.Error(), \"is not banned\") {\n   156→\t\t\twriteJSON(w, http.StatusNotFound, map[string]string{\"error\": \"user is not banned\"})\n   157→\t\t\treturn\n   158→\t\t}\n   159→\t\tslog.Error(\"admin: unban user\", \"err\", err)\n   160→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   161→\t\treturn\n   162→\t}\n   163→\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"unbanned\"})\n   164→}\n   165→\n   166→// getStats returns server metrics, stream info, and viewer capacity.\n   167→func (h *Handler) getStats(w http.ResponseWriter, r *http.Request) {\n   168→\tsys := GetSysInfo()\n   169→\n   170→\tvar m runtime.MemStats\n   171→\truntime.ReadMemStats(&m)\n   172→\n   173→\tuptime := time.Since(h.ingestMgr.StartedAt()).Seconds()\n   174→\thlsDisk := dirSizeMB(h.hlsDir)\n   175→\tqualities := h.ingestMgr.EnabledQualities()\n   176→\n   177→\tbw := h.getBandwidth(r)\n   178→\tcapacity := viewerCapacity(bw, qualities)\n   179→\n   180→\twriteJSON(w, http.StatusOK, map[string]any{\n   181→\t\t\"uptime_seconds\":    int64(uptime),\n   182→\t\t\"cpu_usage_percent\": math.Round(sys.CPUUsagePercent*10) / 10,\n   183→\t\t\"cpu_cores\":         sys.CPUCores,\n   184→\t\t\"mem_total_mb\":      math.Round(sys.MemTotalMB*10) / 10,\n   185→\t\t\"mem_used_mb\":       math.Round(sys.MemUsedMB*10) / 10,\n   186→\t\t\"mem_used_percent\":  math.Round(sys.MemUsedPercent*10) / 10,\n   187→\t\t\"mem_go_alloc_mb\":   math.Round(float64(m.Alloc)/1024/1024*10) / 10,\n   188→\t\t\"num_goroutines\":    runtime.NumGoroutine(),\n   189→\t\t\"hls_disk_usage_mb\": math.Round(hlsDisk*10) / 10,\n   190→\t\t\"stream_live\":       h.ingestMgr.IsLive(),\n   191→\t\t\"qualities\":         qualities,\n   192→\t\t\"bandwidth_mbps\":    bw,\n   193→\t\t\"viewer_capacity\":   capacity,\n   194→\t})\n   195→}\n   196→\n   197→// getQualities returns enabled and available quality lists plus preset info.\n   198→func (h *Handler) getQualities(w http.ResponseWriter, r *http.Request) {\n   199→\twriteJSON(w, http.StatusOK, map[string]any{\n   200→\t\t\"enabled\":           h.ingestMgr.EnabledQualities(),\n   201→\t\t\"available\":         ingest.AllQualityNames(),\n   202→\t\t\"fps\":               h.ingestMgr.FPSOverrides(),\n   203→\t\t\"preset\":            h.ingestMgr.GetPreset(),\n   204→\t\t\"available_presets\": ingest.ValidPresets,\n   205→\t\t\"auto_preset\":       ingest.AutoPreset(),\n   206→\t\t\"cpu_cores\":         runtime.NumCPU(),\n   207→\t})\n   208→}\n   209→\n   210→type qualitiesRequest struct {\n   211→\tEnabled []string       `json:\"enabled\"`\n   212→\tFPS     map[string]int `json:\"fps,omitempty\"`\n   213→\tPreset  string         `json:\"preset,omitempty\"`\n   214→}\n   215→\n   216→// updateQualities validates, persists, and applies quality changes.\n   217→func (h *Handler) updateQualities(w http.ResponseWriter, r *http.Request) {\n   218→\tvar req qualitiesRequest\n   219→\tif err := json.NewDecoder(r.Body).Decode(&req); err != nil {\n   220→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid JSON\"})\n   221→\t\treturn\n   222→\t}\n   223→\n   224→\t// Validate names\n   225→\tvalid := ingest.FilterQualities(req.Enabled)\n   226→\tif len(valid) == 0 {\n   227→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"at least one valid quality required\"})\n   228→\t\treturn\n   229→\t}\n   230→\n   231→\t// Validate preset if provided\n   232→\tif req.Preset != \"\" && !ingest.IsValidPreset(req.Preset) {\n   233→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid preset\"})\n   234→\t\treturn\n   235→\t}\n   236→\n   237→\t// Validate FPS overrides if provided\n   238→\tfor name, fps := range req.FPS {\n   239→\t\tif fps != 30 && fps != 60 {\n   240→\t\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"fps must be 30 or 60\"})\n   241→\t\t\treturn\n   242→\t\t}\n   243→\t\tq := ingest.QualityByName(name)\n   244→\t\tif q == nil || !q.IsHD() {\n   245→\t\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"fps override only for HD qualities (720p+)\"})\n   246→\t\t\treturn\n   247→\t\t}\n   248→\t}\n   249→\n   250→\t// Persist to DB\n   251→\tnames := make([]string, len(valid))\n   252→\tfor i, q := range valid {\n   253→\t\tnames[i] = q.Name\n   254→\t}\n   255→\tsettingsToSave := map[string]string{\n   256→\t\t\"qualities_enabled\": strings.Join(names, \",\"),\n   257→\t}\n   258→\tif len(req.FPS) > 0 {\n   259→\t\t// Merge with current overrides so partial updates work\n   260→\t\tmerged := h.ingestMgr.FPSOverrides()\n   261→\t\tfor k, v := range req.FPS {\n   262→\t\t\tmerged[k] = v\n   263→\t\t}\n   264→\t\tsettingsToSave[\"stream_fps\"] = ingest.SerializeFPSOverrides(merged)\n   265→\t}\n   266→\tif req.Preset != \"\" {\n   267→\t\tsettingsToSave[\"ffmpeg_preset\"] = req.Preset\n   268→\t}\n   269→\terr := h.store.UpdateSettings(r.Context(), settingsToSave)\n   270→\tif err != nil {\n   271→\t\tslog.Error(\"admin: persist qualities\", \"err\", err)\n   272→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"internal error\"})\n   273→\t\treturn\n   274→\t}\n   275→\n   276→\t// Apply\n   277→\th.ingestMgr.SetQualities(names)\n   278→\tif len(req.FPS) > 0 {\n   279→\t\th.ingestMgr.SetFPSOverrides(req.FPS)\n   280→\t}\n   281→\tif req.Preset != \"\" {\n   282→\t\th.ingestMgr.SetPreset(req.Preset)\n   283→\t}\n   284→\n   285→\trestarted := false\n   286→\tif h.ingestMgr.IsLive() {\n   287→\t\th.ingestMgr.Restart()\n   288→\t\trestarted = true\n   289→\t}\n   290→\n   291→\twriteJSON(w, http.StatusOK, map[string]any{\n   292→\t\t\"enabled\":           names,\n   293→\t\t\"available\":         ingest.AllQualityNames(),\n   294→\t\t\"fps\":               h.ingestMgr.FPSOverrides(),\n   295→\t\t\"preset\":            h.ingestMgr.GetPreset(),\n   296→\t\t\"available_presets\": ingest.ValidPresets,\n   297→\t\t\"auto_preset\":       ingest.AutoPreset(),\n   298→\t\t\"cpu_cores\":         runtime.NumCPU(),\n   299→\t\t\"restarted\":         restarted,\n   300→\t})\n   301→}\n   302→\n   303→// getBandwidth reads server_bandwidth_mbps from DB settings, falling back to env default.\n   304→func (h *Handler) getBandwidth(r *http.Request) int {\n   305→\tsettings, err := h.store.GetSettings(r.Context())\n   306→\tif err == nil {\n   307→\t\tif v, ok := settings[\"server_bandwidth_mbps\"]; ok {\n   308→\t\t\tif n, err := strconv.Atoi(v); err == nil && n > 0 {\n   309→\t\t\t\treturn n\n   310→\t\t\t}\n   311→\t\t}\n   312→\t}\n   313→\treturn h.defaultBW\n   314→}\n   315→\n   316→// viewerCapacity computes max viewers per quality given total bandwidth.\n   317→func viewerCapacity(bandwidthMbps int, qualityNames []string) map[string]int {\n   318→\tcap := make(map[string]int, len(qualityNames))\n   319→\tfor _, name := range qualityNames {\n   320→\t\tq := ingest.QualityByName(name)\n   321→\t\tif q == nil {\n   322→\t\t\tcontinue\n   323→\t\t}\n   324→\t\tbps := q.TotalBitrateMbps()\n   325→\t\tif bps > 0 {\n   326→\t\t\tcap[name] = int(float64(bandwidthMbps) / bps)\n   327→\t\t}\n   328→\t}\n   329→\treturn cap\n   330→}\n   331→\n   332→// dirSizeMB returns total size of files in dir (recursive) in MB.\n   333→func dirSizeMB(dir string) float64 {\n   334→\tvar total int64\n   335→\tfilepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {\n   336→\t\tif err != nil || info.IsDir() {\n   337→\t\t\treturn nil\n   338→\t\t}\n   339→\t\ttotal += info.Size()\n   340→\t\treturn nil\n   341→\t})\n   342→\treturn float64(total) / 1024.0 / 1024.0\n   343→}\n   344→\n   345→func (h *Handler) uploadIcon(w http.ResponseWriter, r *http.Request) {\n   346→\tif err := r.ParseMultipartForm(1 << 20); err != nil { // 1MB max\n   347→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"invalid form data\"})\n   348→\t\treturn\n   349→\t}\n   350→\n   351→\tfile, header, err := r.FormFile(\"icon\")\n   352→\tif err != nil {\n   353→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"icon file is required\"})\n   354→\t\treturn\n   355→\t}\n   356→\tdefer file.Close()\n   357→\n   358→\text := strings.ToLower(filepath.Ext(header.Filename))\n   359→\tif !isAllowedIconExt(ext) {\n   360→\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"error\": \"unsupported icon format, allowed: png, jpg, jpeg, svg, ico\"})\n   361→\t\treturn\n   362→\t}\n   363→\n   364→\t// Remove existing icon files\n   365→\tfor _, e := range allowedIconExts {\n   366→\t\tos.Remove(filepath.Join(h.dataDir, \"icon\"+e))\n   367→\t}\n   368→\n   369→\tdst, err := os.Create(filepath.Join(h.dataDir, \"icon\"+ext))\n   370→\tif err != nil {\n   371→\t\tslog.Error(\"admin: create icon file\", \"err\", err)\n   372→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"failed to save icon\"})\n   373→\t\treturn\n   374→\t}\n   375→\tdefer dst.Close()\n   376→\n   377→\tif _, err := io.Copy(dst, file); err != nil {\n   378→\t\tslog.Error(\"admin: write icon file\", \"err\", err)\n   379→\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": \"failed to save icon\"})\n   380→\t\treturn\n   381→\t}\n   382→\n   383→\tslog.Info(\"admin: icon updated\")\n   384→\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"ok\"})\n   385→}\n   386→\n   387→func isAllowedIconExt(ext string) bool {\n   388→\tfor _, a := range allowedIconExts {\n   389→\t\tif a == ext {\n   390→\t\t\treturn true\n   391→\t\t}\n   392→\t}\n   393→\treturn false\n   394→}\n   395→\n   396→func writeJSON(w http.ResponseWriter, status int, v any) {\n   397→\tw.Header().Set(\"Content-Type\", \"application/json\")\n   398→\tw.WriteHeader(status)\n   399→\tjson.NewEncoder(w).Encode(v)\n   400→}\n   401→",
+          "timestamp": "2026-03-22T10:56:46.861Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package main\n     2→\n     3→import (\n     4→\t\"context\"\n     5→\t\"encoding/json\"\n     6→\t\"log/slog\"\n     7→\t\"net/http\"\n     8→\t\"os\"\n     9→\t\"os/signal\"\n    10→\t\"path/filepath\"\n    11→\t\"strings\"\n    12→\t\"syscall\"\n    13→\t\"time\"\n    14→\n    15→\t\"desent/internal/admin\"\n    16→\t\"desent/internal/auth\"\n    17→\t\"desent/internal/chat\"\n    18→\t\"desent/internal/config\"\n    19→\t\"desent/internal/db\"\n    20→\t\"desent/internal/hls\"\n    21→\t\"desent/internal/ingest\"\n    22→\t\"desent/internal/setup\"\n    23→)\n    24→\n    25→// Set via -ldflags at build time.\n    26→var version = \"dev\"\n    27→\n    28→func corsMiddleware(next http.Handler) http.Handler {\n    29→\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n    30→\t\tw.Header().Set(\"Access-Control-Allow-Origin\", \"*\")\n    31→\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"GET, POST, PUT, DELETE, OPTIONS\")\n    32→\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Content-Type, Authorization\")\n    33→\n    34→\t\tif r.Method == http.MethodOptions {\n    35→\t\t\tw.WriteHeader(http.StatusNoContent)\n    36→\t\t\treturn\n    37→\t\t}\n    38→\n    39→\t\tnext.ServeHTTP(w, r)\n    40→\t})\n    41→}\n    42→\n    43→func main() {\n    44→\tcfg := config.Load()\n    45→\n    46→\tslog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{\n    47→\t\tLevel: config.ParseLogLevel(cfg.LogLevel),\n    48→\t})))\n    49→\tslog.Info(\"starting desent\", \"version\", version)\n    50→\tif cfg.JWTSecret == \"\" {\n    51→\t\tslog.Error(\"JWT_SECRET environment variable is required\")\n    52→\t\tos.Exit(1)\n    53→\t}\n    54→\n    55→\t// Data directory\n    56→\tif err := os.MkdirAll(cfg.DataDir, 0755); err != nil {\n    57→\t\tslog.Error(\"failed to create data dir\", \"path\", cfg.DataDir, \"err\", err)\n    58→\t\tos.Exit(1)\n    59→\t}\n    60→\n    61→\t// Database\n    62→\tdatabase, err := db.Open(cfg.DBPath)\n    63→\tif err != nil {\n    64→\t\tslog.Error(\"failed to open database\", \"err\", err)\n    65→\t\tos.Exit(1)\n    66→\t}\n    67→\tdefer database.Close()\n    68→\n    69→\tif err := db.Migrate(database); err != nil {\n    70→\t\tslog.Error(\"failed to run migrations\", \"err\", err)\n    71→\t\tos.Exit(1)\n    72→\t}\n    73→\tslog.Info(\"database ready\", \"path\", cfg.DBPath)\n    74→\n    75→\t// HLS directories — create for ALL quality presets\n    76→\tfor _, q := range ingest.AllQualities {\n    77→\t\tdir := filepath.Join(cfg.HLSDir, q.Name)\n    78→\t\tif err := os.MkdirAll(dir, 0755); err != nil {\n    79→\t\t\tslog.Error(\"failed to create HLS dir\", \"path\", dir, \"err\", err)\n    80→\t\t\tos.Exit(1)\n    81→\t\t}\n    82→\t}\n    83→\n    84→\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n    85→\tdefer stop()\n    86→\n    87→\t// Clean stale HLS files from previous run\n    88→\thls.CleanAll(cfg.HLSDir)\n    89→\n    90→\t// HLS segment cache\n    91→\tsegmentCache, err := hls.NewSegmentCache(cfg.HLSDir, cfg.HLSCacheMB)\n    92→\tif err != nil {\n    93→\t\tslog.Error(\"failed to create segment cache\", \"err\", err)\n    94→\t\tos.Exit(1)\n    95→\t}\n    96→\tgo segmentCache.Start(ctx)\n    97→\n    98→\t// Ingest (FFmpeg subprocess)\n    99→\tingestMgr := ingest.NewManager(ingest.Config{\n   100→\t\tFFmpegPath: cfg.FFmpegPath,\n   101→\t\tRTMPAddr:   cfg.RTMPAddr,\n   102→\t\tStreamKey:  cfg.StreamKey,\n   103→\t\tHLSDir:     cfg.HLSDir,\n   104→\t\tOnStreamEnd: func() {\n   105→\t\t\thls.CleanAll(cfg.HLSDir)\n   106→\t\t\tsegmentCache.Purge()\n   107→\t\t},\n   108→\t})\n   109→\n   110→\t// Load persisted qualities from DB\n   111→\tadminStore := admin.NewStore(database)\n   112→\tif settings, err := adminStore.GetSettings(ctx); err == nil {\n   113→\t\tif v, ok := settings[\"qualities_enabled\"]; ok && v != \"\" {\n   114→\t\t\tnames := strings.Split(v, \",\")\n   115→\t\t\tingestMgr.SetQualities(names)\n   116→\t\t\tslog.Info(\"loaded persisted qualities\", \"qualities\", names)\n   117→\t\t}\n   118→\t\tif v, ok := settings[\"stream_fps\"]; ok && v != \"\" {\n   119→\t\t\toverrides := ingest.ParseFPSOverrides(v)\n   120→\t\t\tingestMgr.SetFPSOverrides(overrides)\n   121→\t\t\tslog.Info(\"loaded persisted FPS overrides\", \"fps\", overrides)\n   122→\t\t}\n   123→\t\tif v, ok := settings[\"ffmpeg_preset\"]; ok && v != \"\" && ingest.IsValidPreset(v) {\n   124→\t\t\tingestMgr.SetPreset(v)\n   125→\t\t\tslog.Info(\"loaded persisted FFmpeg preset\", \"preset\", v, \"resolved\", ingestMgr.ResolvedPreset())\n   126→\t\t}\n   127→\t}\n   128→\n   129→\tgo ingestMgr.Run(ctx)\n   130→\n   131→\t// HLS segment cleaner\n   132→\thls.StartCleaner(ctx, cfg.HLSDir, 30*time.Second, 60*time.Second)\n   133→\n   134→\t// Routes\n   135→\tmux := http.NewServeMux()\n   136→\n   137→\tmux.HandleFunc(\"GET /health\", func(w http.ResponseWriter, r *http.Request) {\n   138→\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n   139→\t\tw.Write([]byte(`{\"status\":\"ok\"}`))\n   140→\t})\n   141→\n   142→\tmux.HandleFunc(\"GET /api/version\", func(w http.ResponseWriter, r *http.Request) {\n   143→\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n   144→\t\tjson.NewEncoder(w).Encode(map[string]string{\"version\": version})\n   145→\t})\n   146→\n   147→\t// Auth\n   148→\tauthStore := auth.NewStore(database)\n   149→\ttokenService := auth.NewTokenService(cfg.JWTSecret)\n   150→\tauthHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost)\n   151→\tauthHandler.RegisterRoutes(mux)\n   152→\n   153→\t// Setup\n   154→\tsetupStore := setup.NewStore(database)\n   155→\tsetupHandler := setup.NewHandler(setupStore, authStore, tokenService, cfg.BcryptCost, cfg.DataDir)\n   156→\tsetupHandler.RegisterRoutes(mux)\n   157→\n   158→\t// Chat\n   159→\tchatStore := chat.NewStore(database)\n   160→\tchatHub := chat.NewHub(chatStore, ingestMgr, adminStore)\n   161→\tgo chatHub.Run(ctx)\n   162→\n   163→\tchatHandler := chat.NewHandler(chatHub, chatStore, tokenService, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)\n   164→\tchatHandler.RegisterRoutes(mux)\n   165→\n   166→\t// HLS streaming\n   167→\thlsHandler := hls.NewHandler(cfg.HLSDir, segmentCache)\n   168→\thlsHandler.RegisterRoutes(mux)\n   169→\tmux.HandleFunc(\"GET /api/stream/status\", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore))\n   170→\n   171→\t// Admin API\n   172→\tadminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps, cfg.DataDir)\n   173→\tadminMW := func(h http.Handler) http.Handler {\n   174→\t\treturn auth.RequireAuth(tokenService)(auth.RequireAdmin(h))\n   175→\t}\n   176→\tadminHandler.RegisterRoutes(mux, adminMW)\n   177→\n   178→\t// Static files (test player)\n   179→\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"./static\"))))\n   180→\n   181→\tsrv := &http.Server{\n   182→\t\tAddr:              cfg.HTTPAddr,\n   183→\t\tHandler:           corsMiddleware(mux),\n   184→\t\tReadHeaderTimeout: 10 * time.Second,\n   185→\t\tWriteTimeout:      30 * time.Second,\n   186→\t\tIdleTimeout:       120 * time.Second,\n   187→\t}\n   188→\n   189→\tgo func() {\n   190→\t\tslog.Info(\"HTTP server listening\", \"addr\", cfg.HTTPAddr)\n   191→\t\tif err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {\n   192→\t\t\tslog.Error(\"HTTP server error\", \"err\", err)\n   193→\t\t\tos.Exit(1)\n   194→\t\t}\n   195→\t}()\n   196→\n   197→\t<-ctx.Done()\n   198→\tslog.Info(\"shutdown signal received\")\n   199→\n   200→\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)\n   201→\tdefer cancel()\n   202→\n   203→\tif err := srv.Shutdown(shutdownCtx); err != nil {\n   204→\t\tslog.Error(\"HTTP shutdown error\", \"err\", err)\n   205→\t}\n   206→\tslog.Info(\"server stopped\")\n   207→}\n   208→",
+          "timestamp": "2026-03-22T10:56:46.863Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→import type {\n     2→  AuthResponse,\n     3→  StreamStatus,\n     4→  ChatSessionsResponse,\n     5→  ChatHistoryResponse,\n     6→  AdminSettings,\n     7→  UserInfo,\n     8→  ServerStats,\n     9→  QualitiesConfig,\n    10→  SetupStatus,\n    11→  SetupCompleteResponse,\n    12→} from \"./api-types\"\n    13→\n    14→const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL\n    15→  || (typeof window !== \"undefined\" ? window.location.origin : \"http://localhost:8080\")\n    16→\n    17→export class ApiError extends Error {\n    18→  constructor(\n    19→    message: string,\n    20→    public status: number,\n    21→  ) {\n    22→    super(message)\n    23→    this.name = \"ApiError\"\n    24→  }\n    25→}\n    26→\n    27→class ApiClient {\n    28→  private baseUrl: string\n    29→\n    30→  constructor(baseUrl: string = BACKEND) {\n    31→    this.baseUrl = baseUrl\n    32→  }\n    33→\n    34→  private getToken(): string | null {\n    35→    if (typeof window === \"undefined\") return null\n    36→    return localStorage.getItem(\"token\")\n    37→  }\n    38→\n    39→  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {\n    40→    const headers: Record<string, string> = {}\n    41→    if (body !== undefined) {\n    42→      headers[\"Content-Type\"] = \"application/json\"\n    43→    }\n    44→    const token = this.getToken()\n    45→    if (token) {\n    46→      headers[\"Authorization\"] = `Bearer ${token}`\n    47→    }\n    48→\n    49→    const res = await fetch(`${this.baseUrl}${path}`, {\n    50→      method,\n    51→      headers,\n    52→      body: body !== undefined ? JSON.stringify(body) : undefined,\n    53→    })\n    54→\n    55→    if (!res.ok) {\n    56→      const data = await res.json().catch(() => ({}))\n    57→      throw new ApiError(data.error || `request failed (${res.status})`, res.status)\n    58→    }\n    59→\n    60→    return res.json() as Promise<T>\n    61→  }\n    62→\n    63→  async get<T>(path: string, params?: Record<string, string>): Promise<T> {\n    64→    let url = path\n    65→    if (params) {\n    66→      const search = new URLSearchParams(params).toString()\n    67→      if (search) url += `?${search}`\n    68→    }\n    69→    return this.request<T>(\"GET\", url)\n    70→  }\n    71→\n    72→  async post<T>(path: string, body?: unknown): Promise<T> {\n    73→    return this.request<T>(\"POST\", path, body)\n    74→  }\n    75→\n    76→  async put<T>(path: string, body?: unknown): Promise<T> {\n    77→    return this.request<T>(\"PUT\", path, body)\n    78→  }\n    79→\n    80→  async delete<T>(path: string): Promise<T> {\n    81→    return this.request<T>(\"DELETE\", path)\n    82→  }\n    83→\n    84→  // Auth\n    85→\n    86→  login(username: string, password: string): Promise<AuthResponse> {\n    87→    return this.post(\"/api/auth/login\", { username, password })\n    88→  }\n    89→\n    90→  register(username: string, password: string): Promise<AuthResponse> {\n    91→    return this.post(\"/api/auth/register\", { username, password })\n    92→  }\n    93→\n    94→  // Stream\n    95→\n    96→  getStreamStatus(): Promise<StreamStatus> {\n    97→    return this.get(\"/api/stream/status\")\n    98→  }\n    99→\n   100→  getHlsUrl(quality: string): string {\n   101→    return `${this.baseUrl}/live/${quality}/index.m3u8`\n   102→  }\n   103→\n   104→  // Chat\n   105→\n   106→  getChatSessions(limit?: number): Promise<ChatSessionsResponse> {\n   107→    const params: Record<string, string> = {}\n   108→    if (limit !== undefined) params.limit = String(limit)\n   109→    return this.get(\"/api/chat/sessions\", params)\n   110→  }\n   111→\n   112→  getChatHistory(sessionId: number, limit?: number, before?: number): Promise<ChatHistoryResponse> {\n   113→    const params: Record<string, string> = {}\n   114→    if (limit !== undefined) params.limit = String(limit)\n   115→    if (before !== undefined) params.before = String(before)\n   116→    return this.get(`/api/chat/history/${sessionId}`, params)\n   117→  }\n   118→\n   119→  getChatWsUrl(token: string): string {\n   120→    const url = new URL(this.baseUrl)\n   121→    url.protocol = url.protocol === \"https:\" ? \"wss:\" : \"ws:\"\n   122→    return `${url.origin}/ws/chat?token=${encodeURIComponent(token)}`\n   123→  }\n   124→\n   125→  // Admin\n   126→\n   127→  getAdminSettings(): Promise<AdminSettings> {\n   128→    return this.get(\"/api/admin/settings\")\n   129→  }\n   130→\n   131→  updateAdminSettings(settings: AdminSettings): Promise<AdminSettings> {\n   132→    return this.put(\"/api/admin/settings\", settings)\n   133→  }\n   134→\n   135→  getAdminUsers(): Promise<UserInfo[]> {\n   136→    return this.get(\"/api/admin/users\")\n   137→  }\n   138→\n   139→  banUser(userId: number, reason: string): Promise<void> {\n   140→    return this.post(\"/api/admin/ban\", { user_id: userId, reason })\n   141→  }\n   142→\n   143→  unbanUser(userId: number): Promise<void> {\n   144→    return this.delete(`/api/admin/ban/${userId}`)\n   145→  }\n   146→\n   147→  getAdminStats(): Promise<ServerStats> {\n   148→    return this.get(\"/api/admin/stats\")\n   149→  }\n   150→\n   151→  getAdminQualities(): Promise<QualitiesConfig> {\n   152→    return this.get(\"/api/admin/qualities\")\n   153→  }\n   154→\n   155→  updateAdminQualities(enabled: string[], fps?: Record<string, number>, preset?: string): Promise<QualitiesConfig> {\n   156→    const body: Record<string, unknown> = { enabled }\n   157→    if (fps !== undefined) body.fps = fps\n   158→    if (preset !== undefined) body.preset = preset\n   159→    return this.put(\"/api/admin/qualities\", body)\n   160→  }\n   161→\n   162→  // Setup\n   163→\n   164→  getSetupStatus(): Promise<SetupStatus> {\n   165→    return this.get(\"/api/setup/status\")\n   166→  }\n   167→\n   168→  async completeSetup(username: string, password: string, icon?: File): Promise<SetupCompleteResponse> {\n   169→    const form = new FormData()\n   170→    form.append(\"username\", username)\n   171→    form.append(\"password\", password)\n   172→    if (icon) form.append(\"icon\", icon)\n   173→\n   174→    const res = await fetch(`${this.baseUrl}/api/setup/complete`, {\n   175→      method: \"POST\",\n   176→      body: form,\n   177→    })\n   178→\n   179→    if (!res.ok) {\n   180→      const data = await res.json().catch(() => ({}))\n   181→      throw new ApiError(data.error || `request failed (${res.status})`, res.status)\n   182→    }\n   183→\n   184→    return res.json() as Promise<SetupCompleteResponse>\n   185→  }\n   186→\n   187→  getIconUrl(): string {\n   188→    return `${this.baseUrl}/api/icon`\n   189→  }\n   190→\n   191→  async uploadIcon(icon: File): Promise<void> {\n   192→    const form = new FormData()\n   193→    form.append(\"icon\", icon)\n   194→\n   195→    const token = this.getToken()\n   196→    const headers: Record<string, string> = {}\n   197→    if (token) headers[\"Authorization\"] = `Bearer ${token}`\n   198→\n   199→    const res = await fetch(`${this.baseUrl}/api/admin/icon`, {\n   200→      method: \"POST\",\n   201→      headers,\n   202→      body: form,\n   203→    })\n   204→\n   205→    if (!res.ok) {\n   206→      const data = await res.json().catch(() => ({}))\n   207→      throw new ApiError(data.error || `request failed (${res.status})`, res.status)\n   208→    }\n   209→  }\n   210→}\n   211→\n   212→export const api = new ApiClient()\n   213→",
+          "timestamp": "2026-03-22T10:56:46.864Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now I have a complete understanding of the codebase. Let me create all the tasks and start implementing.",
+          "timestamp": "2026-03-22T10:56:57.709Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Creating Docker Engine API client",
+            "description": "Minimal HTTP client that talks to Docker daemon via Unix socket. Implements PullImage, ListContainers, InspectContainer, StopContainer, RemoveContainer, CreateContainer, StartContainer, and SocketAvailable.",
+            "subject": "Create internal/update/docker.go — Docker Engine API client"
+          },
+          "timestamp": "2026-03-22T10:56:59.395Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #1 created successfully: Create internal/update/docker.go — Docker Engine API client",
+          "timestamp": "2026-03-22T10:56:59.406Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Creating update logic",
+            "description": "CheckForUpdate (GitHub API), Apply (pull images, recreate web container, launch helper), RecreateContainer function, SSE progress tracking.",
+            "subject": "Create internal/update/updater.go — Core update logic"
+          },
+          "timestamp": "2026-03-22T10:57:04.763Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #2 created successfully: Create internal/update/updater.go — Core update logic",
+          "timestamp": "2026-03-22T10:57:04.772Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Creating HTTP handler",
+            "description": "Check, apply, and SSE progress endpoints with admin auth middleware.",
+            "subject": "Create internal/update/handler.go — HTTP endpoints + SSE"
+          },
+          "timestamp": "2026-03-22T10:57:09.384Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #3 created successfully: Create internal/update/handler.go — HTTP endpoints + SSE",
+          "timestamp": "2026-03-22T10:57:09.392Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Modifying existing files",
+            "description": "Add 4 config fields, add update-self CLI mode to main.go, wire updater + handler, add socket mount to docker-compose.",
+            "subject": "Modify config, main.go, docker-compose.yml"
+          },
+          "timestamp": "2026-03-22T10:57:14.071Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #4 created successfully: Modify config, main.go, docker-compose.yml",
+          "timestamp": "2026-03-22T10:57:14.078Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Implementing frontend update page",
+            "description": "Add TypeScript types, API client methods, admin nav item, and the full update page UI component.",
+            "subject": "Add frontend: types, API client, nav item, update page"
+          },
+          "timestamp": "2026-03-22T10:57:18.631Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #5 created successfully: Add frontend: types, API client, nav item, update page",
+          "timestamp": "2026-03-22T10:57:18.903Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskCreate",
+          "input": {
+            "activeForm": "Verifying Go compilation",
+            "description": "Run go build to ensure all Go code compiles without errors.",
+            "subject": "Build and verify Go compilation"
+          },
+          "timestamp": "2026-03-22T10:57:23.495Z"
+        },
+        {
+          "type": "user",
+          "text": "Task #6 created successfully: Build and verify Go compilation",
+          "timestamp": "2026-03-22T10:57:23.502Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now let me start implementing. I'll begin with the three Go files in the `internal/update` package.",
+          "timestamp": "2026-03-22T10:57:27.256Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "1"
+          },
+          "timestamp": "2026-03-22T10:57:27.601Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #1 status",
+          "timestamp": "2026-03-22T10:57:27.606Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /Users/m.ovchinnikov/GolandProjects/desent/internal/update",
+            "description": "Create update package directory"
+          },
+          "timestamp": "2026-03-22T10:57:31.617Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package update\n\nimport (\n\t\"bufio\"\n\t\"context\"\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"io\"\n\t\"net\"\n\t\"net/http\"\n\t\"net/url\"\n\t\"os\"\n\t\"strings\"\n)\n\nconst dockerSocket = \"/var/run/docker.sock\"\n\n// dockerClient talks to Docker Engine API via Unix socket.\ntype dockerClient struct {\n\thttpClient *http.Client\n}\n\nfunc newDockerClient() *dockerClient {\n\treturn &dockerClient{\n\t\thttpClient: &http.Client{\n\t\t\tTransport: &http.Transport{\n\t\t\t\tDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {\n\t\t\t\t\treturn net.Dial(\"unix\", dockerSocket)\n\t\t\t\t},\n\t\t\t},\n\t\t},\n\t}\n}\n\n// SocketAvailable checks if Docker socket is accessible.\nfunc SocketAvailable() bool {\n\tinfo, err := os.Stat(dockerSocket)\n\tif err != nil {\n\t\treturn false\n\t}\n\treturn info.Mode()&os.ModeSocket != 0\n}\n\n// ContainerSummary is a subset of Docker's container list response.\ntype ContainerSummary struct {\n\tID     string            `json:\"Id\"`\n\tNames  []string          `json:\"Names\"`\n\tImage  string            `json:\"Image\"`\n\tLabels map[string]string `json:\"Labels\"`\n\tState  string            `json:\"State\"`\n}\n\n// ContainerInspect holds the full container config from Docker inspect.\ntype ContainerInspect struct {\n\tID     string          `json:\"Id\"`\n\tName   string          `json:\"Name\"`\n\tConfig ContainerConfig `json:\"Config\"`\n\tHostConfig   HostConfig       `json:\"HostConfig\"`\n\tNetworkSettings NetworkSettings `json:\"NetworkSettings\"`\n}\n\ntype ContainerConfig struct {\n\tImage        string              `json:\"Image\"`\n\tEnv          []string            `json:\"Env\"`\n\tCmd          []string            `json:\"Cmd\"`\n\tEntrypoint   []string            `json:\"Entrypoint\"`\n\tExposedPorts map[string]struct{} `json:\"ExposedPorts\"`\n\tLabels       map[string]string   `json:\"Labels\"`\n\tWorkingDir   string              `json:\"WorkingDir\"`\n\tUser         string              `json:\"User\"`\n}\n\ntype HostConfig struct {\n\tBinds         []string                       `json:\"Binds\"`\n\tPortBindings  map[string][]PortBinding        `json:\"PortBindings\"`\n\tRestartPolicy RestartPolicy                   `json:\"RestartPolicy\"`\n\tNetworkMode   string                          `json:\"NetworkMode\"`\n\tAutoRemove    bool                            `json:\"AutoRemove\"`\n}\n\ntype PortBinding struct {\n\tHostIP   string `json:\"HostIp\"`\n\tHostPort string `json:\"HostPort\"`\n}\n\ntype RestartPolicy struct {\n\tName              string `json:\"Name\"`\n\tMaximumRetryCount int    `json:\"MaximumRetryCount\"`\n}\n\ntype NetworkSettings struct {\n\tNetworks map[string]NetworkEndpoint `json:\"Networks\"`\n}\n\ntype NetworkEndpoint struct {\n\tNetworkID  string `json:\"NetworkID\"`\n\tEndpointID string `json:\"EndpointID\"`\n\tGateway    string `json:\"Gateway\"`\n\tIPAddress  string `json:\"IPAddress\"`\n\tAliases    []string `json:\"Aliases\"`\n}\n\n// ContainerCreateBody is the request body for creating a container.\ntype ContainerCreateBody struct {\n\tImage        string              `json:\"Image\"`\n\tEnv          []string            `json:\"Env,omitempty\"`\n\tCmd          []string            `json:\"Cmd,omitempty\"`\n\tEntrypoint   []string            `json:\"Entrypoint,omitempty\"`\n\tExposedPorts map[string]struct{} `json:\"ExposedPorts,omitempty\"`\n\tLabels       map[string]string   `json:\"Labels,omitempty\"`\n\tWorkingDir   string              `json:\"WorkingDir,omitempty\"`\n\tUser         string              `json:\"User,omitempty\"`\n\tHostConfig   *HostConfig         `json:\"HostConfig,omitempty\"`\n\tNetworkingConfig *NetworkingConfig `json:\"NetworkingConfig,omitempty\"`\n}\n\ntype NetworkingConfig struct {\n\tEndpointsConfig map[string]EndpointConfig `json:\"EndpointsConfig,omitempty\"`\n}\n\ntype EndpointConfig struct {\n\tAliases []string `json:\"Aliases,omitempty\"`\n}\n\n// pullProgress is a single line from Docker's image pull stream.\ntype pullProgress struct {\n\tStatus         string        `json:\"status\"`\n\tID             string        `json:\"id\"`\n\tProgressDetail progressDetail `json:\"progressDetail\"`\n\tError          string        `json:\"error\"`\n}\n\ntype progressDetail struct {\n\tCurrent int64 `json:\"current\"`\n\tTotal   int64 `json:\"total\"`\n}\n\n// PullImage pulls a Docker image, calling onProgress with download status.\nfunc (c *dockerClient) PullImage(ctx context.Context, image, tag string, onProgress func(status string, current, total int64)) error {\n\tparams := url.Values{}\n\tparams.Set(\"fromImage\", image)\n\tparams.Set(\"tag\", tag)\n\n\treq, err := http.NewRequestWithContext(ctx, http.MethodPost, \"http://docker/images/create?\"+params.Encode(), nil)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: create pull request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: pull image: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode != http.StatusOK {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn fmt.Errorf(\"update: pull image %s:%s: status %d: %s\", image, tag, resp.StatusCode, body)\n\t}\n\n\tscanner := bufio.NewScanner(resp.Body)\n\t// Docker pull streams can have large JSON lines with embedded progress\n\tscanner.Buffer(make([]byte, 0, 64*1024), 256*1024)\n\tvar totalBytes int64\n\tlayerProgress := make(map[string]int64)\n\n\tfor scanner.Scan() {\n\t\tvar p pullProgress\n\t\tif err := json.Unmarshal(scanner.Bytes(), &p); err != nil {\n\t\t\tcontinue\n\t\t}\n\t\tif p.Error != \"\" {\n\t\t\treturn fmt.Errorf(\"update: pull image %s:%s: %s\", image, tag, p.Error)\n\t\t}\n\t\tif onProgress != nil {\n\t\t\tif p.ProgressDetail.Total > 0 {\n\t\t\t\tlayerProgress[p.ID] = p.ProgressDetail.Current\n\t\t\t\tif strings.HasPrefix(p.Status, \"Downloading\") {\n\t\t\t\t\ttotalBytes = p.ProgressDetail.Total\n\t\t\t\t}\n\t\t\t}\n\t\t\tvar currentBytes int64\n\t\t\tfor _, v := range layerProgress {\n\t\t\t\tcurrentBytes += v\n\t\t\t}\n\t\t\tonProgress(p.Status, currentBytes, totalBytes)\n\t\t}\n\t}\n\n\treturn scanner.Err()\n}\n\n// ListContainers lists containers matching the given label filters.\nfunc (c *dockerClient) ListContainers(ctx context.Context, labels map[string]string) ([]ContainerSummary, error) {\n\tfilters := make(map[string][]string)\n\tfor k, v := range labels {\n\t\tfilters[\"label\"] = append(filters[\"label\"], k+\"=\"+v)\n\t}\n\tfiltersJSON, _ := json.Marshal(filters)\n\n\tparams := url.Values{}\n\tparams.Set(\"filters\", string(filtersJSON))\n\tparams.Set(\"all\", \"true\")\n\n\treq, err := http.NewRequestWithContext(ctx, http.MethodGet, \"http://docker/containers/json?\"+params.Encode(), nil)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: create list request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: list containers: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode != http.StatusOK {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn nil, fmt.Errorf(\"update: list containers: status %d: %s\", resp.StatusCode, body)\n\t}\n\n\tvar containers []ContainerSummary\n\tif err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {\n\t\treturn nil, fmt.Errorf(\"update: decode containers: %w\", err)\n\t}\n\treturn containers, nil\n}\n\n// InspectContainer returns full container config.\nfunc (c *dockerClient) InspectContainer(ctx context.Context, id string) (*ContainerInspect, error) {\n\treq, err := http.NewRequestWithContext(ctx, http.MethodGet, \"http://docker/containers/\"+id+\"/json\", nil)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: create inspect request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: inspect container: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode != http.StatusOK {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn nil, fmt.Errorf(\"update: inspect container %s: status %d: %s\", id, resp.StatusCode, body)\n\t}\n\n\tvar info ContainerInspect\n\tif err := json.NewDecoder(resp.Body).Decode(&info); err != nil {\n\t\treturn nil, fmt.Errorf(\"update: decode inspect: %w\", err)\n\t}\n\treturn &info, nil\n}\n\n// StopContainer stops a container with a graceful timeout.\nfunc (c *dockerClient) StopContainer(ctx context.Context, id string, timeoutSec int) error {\n\tparams := url.Values{}\n\tparams.Set(\"t\", fmt.Sprintf(\"%d\", timeoutSec))\n\n\treq, err := http.NewRequestWithContext(ctx, http.MethodPost, \"http://docker/containers/\"+id+\"/stop?\"+params.Encode(), nil)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: create stop request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: stop container: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\t// 204 = stopped, 304 = already stopped\n\tif resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn fmt.Errorf(\"update: stop container %s: status %d: %s\", id, resp.StatusCode, body)\n\t}\n\treturn nil\n}\n\n// RemoveContainer removes a container.\nfunc (c *dockerClient) RemoveContainer(ctx context.Context, id string) error {\n\treq, err := http.NewRequestWithContext(ctx, http.MethodDelete, \"http://docker/containers/\"+id, nil)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: create remove request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: remove container: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode != http.StatusNoContent {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn fmt.Errorf(\"update: remove container %s: status %d: %s\", id, resp.StatusCode, body)\n\t}\n\treturn nil\n}\n\n// createResponse is the response from Docker container create.\ntype createResponse struct {\n\tID       string   `json:\"Id\"`\n\tWarnings []string `json:\"Warnings\"`\n}\n\n// CreateContainer creates a new container and returns its ID.\nfunc (c *dockerClient) CreateContainer(ctx context.Context, name string, body ContainerCreateBody) (string, error) {\n\tbodyJSON, err := json.Marshal(body)\n\tif err != nil {\n\t\treturn \"\", fmt.Errorf(\"update: marshal create body: %w\", err)\n\t}\n\n\tparams := url.Values{}\n\tif name != \"\" {\n\t\tparams.Set(\"name\", name)\n\t}\n\n\treqURL := \"http://docker/containers/create\"\n\tif len(params) > 0 {\n\t\treqURL += \"?\" + params.Encode()\n\t}\n\n\treq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(string(bodyJSON)))\n\tif err != nil {\n\t\treturn \"\", fmt.Errorf(\"update: create container request: %w\", err)\n\t}\n\treq.Header.Set(\"Content-Type\", \"application/json\")\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn \"\", fmt.Errorf(\"update: create container: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode != http.StatusCreated {\n\t\trespBody, _ := io.ReadAll(resp.Body)\n\t\treturn \"\", fmt.Errorf(\"update: create container %s: status %d: %s\", name, resp.StatusCode, respBody)\n\t}\n\n\tvar result createResponse\n\tif err := json.NewDecoder(resp.Body).Decode(&result); err != nil {\n\t\treturn \"\", fmt.Errorf(\"update: decode create response: %w\", err)\n\t}\n\treturn result.ID, nil\n}\n\n// StartContainer starts a stopped container.\nfunc (c *dockerClient) StartContainer(ctx context.Context, id string) error {\n\treq, err := http.NewRequestWithContext(ctx, http.MethodPost, \"http://docker/containers/\"+id+\"/start\", nil)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: create start request: %w\", err)\n\t}\n\n\tresp, err := c.httpClient.Do(req)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"update: start container: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\t// 204 = started, 304 = already started\n\tif resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn fmt.Errorf(\"update: start container %s: status %d: %s\", id, resp.StatusCode, body)\n\t}\n\treturn nil\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go"
+          },
+          "timestamp": "2026-03-22T10:58:11.381Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+          "timestamp": "2026-03-22T10:58:11.491Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "1"
+          },
+          "timestamp": "2026-03-22T10:58:15.096Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #1 status",
+          "timestamp": "2026-03-22T10:58:15.103Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "2"
+          },
+          "timestamp": "2026-03-22T10:58:18.364Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #2 status",
+          "timestamp": "2026-03-22T10:58:18.403Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package update\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"io\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"strings\"\n\t\"sync\"\n\t\"time\"\n)\n\n// Config holds update system configuration.\ntype Config struct {\n\tCurrentVersion string\n\tGitHubRepo     string // \"owner/repo\"\n\tDataDir        string\n\tServerImage    string // Docker Hub image, e.g. \"desent/server\"\n\tWebImage       string // Docker Hub image, e.g. \"desent/web\"\n\tComposeProject string // compose project name for label filtering\n}\n\n// ProgressPhase represents the current phase of an update operation.\ntype ProgressPhase string\n\nconst (\n\tPhaseIdle        ProgressPhase = \"idle\"\n\tPhaseChecking    ProgressPhase = \"checking\"\n\tPhaseDownloading ProgressPhase = \"downloading\"\n\tPhaseApplying    ProgressPhase = \"applying\"\n\tPhaseRestarting  ProgressPhase = \"restarting\"\n\tPhaseFailed      ProgressPhase = \"failed\"\n\tPhaseComplete    ProgressPhase = \"complete\"\n)\n\n// Progress represents the current state of an update operation.\ntype Progress struct {\n\tPhase           ProgressPhase `json:\"phase\"`\n\tPercent         int           `json:\"percent\"`\n\tBytesDownloaded int64         `json:\"bytes_downloaded\"`\n\tBytesTotal      int64         `json:\"bytes_total\"`\n\tMessage         string        `json:\"message\"`\n\tError           string        `json:\"error,omitempty\"`\n}\n\n// ReleaseInfo holds info about a GitHub release.\ntype ReleaseInfo struct {\n\tVersion     string    `json:\"version\"`\n\tPublishedAt time.Time `json:\"published_at\"`\n\tReleaseURL  string    `json:\"release_url\"`\n\tBody        string    `json:\"body\"`\n}\n\n// UpdateCheckResult is the response for the check endpoint.\ntype UpdateCheckResult struct {\n\tCurrentVersion  string       `json:\"current_version\"`\n\tLatestVersion   string       `json:\"latest_version\"`\n\tUpdateAvailable bool         `json:\"update_available\"`\n\tRelease         *ReleaseInfo `json:\"release,omitempty\"`\n\tSocketAvailable bool         `json:\"socket_available\"`\n}\n\n// Updater manages the self-update lifecycle.\ntype Updater struct {\n\tcfg         Config\n\tdocker      *dockerClient\n\tmu          sync.Mutex\n\tupdating    bool\n\tprogress    Progress\n\tsubscribers map[chan Progress]struct{}\n\tsubMu       sync.Mutex\n\tcachedCheck *UpdateCheckResult\n\tcacheExpiry time.Time\n}\n\n// NewUpdater creates a new Updater.\nfunc NewUpdater(cfg Config) *Updater {\n\treturn &Updater{\n\t\tcfg:         cfg,\n\t\tdocker:      newDockerClient(),\n\t\tprogress:    Progress{Phase: PhaseIdle},\n\t\tsubscribers: make(map[chan Progress]struct{}),\n\t}\n}\n\n// Subscribe returns a channel that receives progress updates.\nfunc (u *Updater) Subscribe() chan Progress {\n\tch := make(chan Progress, 16)\n\tu.subMu.Lock()\n\tu.subscribers[ch] = struct{}{}\n\tu.subMu.Unlock()\n\t// Send current state immediately.\n\tu.mu.Lock()\n\tp := u.progress\n\tu.mu.Unlock()\n\tselect {\n\tcase ch <- p:\n\tdefault:\n\t}\n\treturn ch\n}\n\n// Unsubscribe removes a subscriber channel.\nfunc (u *Updater) Unsubscribe(ch chan Progress) {\n\tu.subMu.Lock()\n\tdelete(u.subscribers, ch)\n\tu.subMu.Unlock()\n\t// Drain and close.\n\tclose(ch)\n}\n\nfunc (u *Updater) broadcast(p Progress) {\n\tu.mu.Lock()\n\tu.progress = p\n\tu.mu.Unlock()\n\n\tu.subMu.Lock()\n\tdefer u.subMu.Unlock()\n\tfor ch := range u.subscribers {\n\t\tselect {\n\t\tcase ch <- p:\n\t\tdefault:\n\t\t\t// Drop if subscriber is slow.\n\t\t}\n\t}\n}\n\n// IsUpdating returns true if an update is in progress.\nfunc (u *Updater) IsUpdating() bool {\n\tu.mu.Lock()\n\tdefer u.mu.Unlock()\n\treturn u.updating\n}\n\n// CurrentProgress returns the current progress state.\nfunc (u *Updater) CurrentProgress() Progress {\n\tu.mu.Lock()\n\tdefer u.mu.Unlock()\n\treturn u.progress\n}\n\n// githubRelease is the GitHub API response for a release.\ntype githubRelease struct {\n\tTagName     string    `json:\"tag_name\"`\n\tHTMLURL     string    `json:\"html_url\"`\n\tBody        string    `json:\"body\"`\n\tPublishedAt time.Time `json:\"published_at\"`\n}\n\n// CheckForUpdate queries GitHub for the latest release.\nfunc (u *Updater) CheckForUpdate(ctx context.Context) (*UpdateCheckResult, error) {\n\tu.mu.Lock()\n\tif u.cachedCheck != nil && time.Now().Before(u.cacheExpiry) {\n\t\tresult := u.cachedCheck\n\t\tu.mu.Unlock()\n\t\treturn result, nil\n\t}\n\tu.mu.Unlock()\n\n\tparts := strings.SplitN(u.cfg.GitHubRepo, \"/\", 2)\n\tif len(parts) != 2 {\n\t\treturn nil, fmt.Errorf(\"update: invalid github repo format: %s\", u.cfg.GitHubRepo)\n\t}\n\n\tapiURL := fmt.Sprintf(\"https://api.github.com/repos/%s/%s/releases/latest\", parts[0], parts[1])\n\treq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: create github request: %w\", err)\n\t}\n\treq.Header.Set(\"Accept\", \"application/vnd.github+json\")\n\treq.Header.Set(\"User-Agent\", \"desent-updater/\"+u.cfg.CurrentVersion)\n\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"update: github request: %w\", err)\n\t}\n\tdefer resp.Body.Close()\n\n\tif resp.StatusCode == http.StatusNotFound {\n\t\tresult := &UpdateCheckResult{\n\t\t\tCurrentVersion:  u.cfg.CurrentVersion,\n\t\t\tLatestVersion:   u.cfg.CurrentVersion,\n\t\t\tUpdateAvailable: false,\n\t\t\tSocketAvailable: SocketAvailable(),\n\t\t}\n\t\treturn result, nil\n\t}\n\n\tif resp.StatusCode != http.StatusOK {\n\t\tbody, _ := io.ReadAll(resp.Body)\n\t\treturn nil, fmt.Errorf(\"update: github API status %d: %s\", resp.StatusCode, body)\n\t}\n\n\tvar release githubRelease\n\tif err := json.NewDecoder(resp.Body).Decode(&release); err != nil {\n\t\treturn nil, fmt.Errorf(\"update: decode github response: %w\", err)\n\t}\n\n\tlatestVersion := strings.TrimPrefix(release.TagName, \"v\")\n\tcurrentVersion := strings.TrimPrefix(u.cfg.CurrentVersion, \"v\")\n\n\tresult := &UpdateCheckResult{\n\t\tCurrentVersion:  u.cfg.CurrentVersion,\n\t\tLatestVersion:   release.TagName,\n\t\tUpdateAvailable: latestVersion != currentVersion && currentVersion != \"dev\",\n\t\tSocketAvailable: SocketAvailable(),\n\t}\n\n\tif result.UpdateAvailable {\n\t\tresult.Release = &ReleaseInfo{\n\t\t\tVersion:     release.TagName,\n\t\t\tPublishedAt: release.PublishedAt,\n\t\t\tReleaseURL:  release.HTMLURL,\n\t\t\tBody:        release.Body,\n\t\t}\n\t}\n\n\tu.mu.Lock()\n\tu.cachedCheck = result\n\tu.cacheExpiry = time.Now().Add(5 * time.Minute)\n\tu.mu.Unlock()\n\n\treturn result, nil\n}\n\n// Apply starts the update process in a background goroutine.\n// Returns an error if update is already in progress or socket is unavailable.\nfunc (u *Updater) Apply(ctx context.Context) error {\n\tu.mu.Lock()\n\tif u.updating {\n\t\tu.mu.Unlock()\n\t\treturn fmt.Errorf(\"update already in progress\")\n\t}\n\tu.updating = true\n\tu.mu.Unlock()\n\n\tif !SocketAvailable() {\n\t\tu.mu.Lock()\n\t\tu.updating = false\n\t\tu.mu.Unlock()\n\t\treturn fmt.Errorf(\"docker socket not available\")\n\t}\n\n\tgo u.runApply(ctx)\n\treturn nil\n}\n\nfunc (u *Updater) runApply(ctx context.Context) {\n\tdefer func() {\n\t\tu.mu.Lock()\n\t\tu.updating = false\n\t\tu.mu.Unlock()\n\t}()\n\n\t// Get latest version.\n\tu.broadcast(Progress{Phase: PhaseChecking, Message: \"checking for latest version...\"})\n\tcheck, err := u.CheckForUpdate(ctx)\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to check for update: %v\", err)})\n\t\treturn\n\t}\n\tif !check.UpdateAvailable {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: \"no update available\"})\n\t\treturn\n\t}\n\n\tnewTag := check.LatestVersion\n\tslog.Info(\"update: starting update\", \"from\", u.cfg.CurrentVersion, \"to\", newTag)\n\n\t// Phase 1: Pull images.\n\tu.broadcast(Progress{Phase: PhaseDownloading, Message: \"pulling server image...\", Percent: 0})\n\terr = u.docker.PullImage(ctx, u.cfg.ServerImage, newTag, func(status string, current, total int64) {\n\t\tpct := 0\n\t\tif total > 0 {\n\t\t\tpct = int(float64(current) / float64(total) * 40) // 0-40% for server image\n\t\t}\n\t\tu.broadcast(Progress{\n\t\t\tPhase:           PhaseDownloading,\n\t\t\tPercent:         pct,\n\t\t\tBytesDownloaded: current,\n\t\t\tBytesTotal:      total,\n\t\t\tMessage:         fmt.Sprintf(\"pulling server image: %s\", status),\n\t\t})\n\t})\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to pull server image: %v\", err)})\n\t\treturn\n\t}\n\n\tu.broadcast(Progress{Phase: PhaseDownloading, Message: \"pulling web image...\", Percent: 40})\n\terr = u.docker.PullImage(ctx, u.cfg.WebImage, newTag, func(status string, current, total int64) {\n\t\tpct := 40\n\t\tif total > 0 {\n\t\t\tpct = 40 + int(float64(current)/float64(total)*40) // 40-80% for web image\n\t\t}\n\t\tu.broadcast(Progress{\n\t\t\tPhase:           PhaseDownloading,\n\t\t\tPercent:         pct,\n\t\t\tBytesDownloaded: current,\n\t\t\tBytesTotal:      total,\n\t\t\tMessage:         fmt.Sprintf(\"pulling web image: %s\", status),\n\t\t})\n\t})\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to pull web image: %v\", err)})\n\t\treturn\n\t}\n\n\t// Phase 2: Recreate web container.\n\tu.broadcast(Progress{Phase: PhaseApplying, Percent: 80, Message: \"updating web container...\"})\n\n\twebContainer, err := u.findContainerByService(ctx, \"web\")\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to find web container: %v\", err)})\n\t\treturn\n\t}\n\n\tnewWebImage := u.cfg.WebImage + \":\" + newTag\n\tif err := RecreateContainer(ctx, u.docker, webContainer.ID, newWebImage); err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to update web container: %v\", err)})\n\t\treturn\n\t}\n\tslog.Info(\"update: web container updated\", \"image\", newWebImage)\n\n\t// Phase 3: Launch helper container to recreate self.\n\tu.broadcast(Progress{Phase: PhaseRestarting, Percent: 90, Message: \"restarting server...\"})\n\n\tselfID, err := getSelfContainerID()\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to get own container ID: %v\", err)})\n\t\treturn\n\t}\n\n\tselfInfo, err := u.docker.InspectContainer(ctx, selfID)\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to inspect self: %v\", err)})\n\t\treturn\n\t}\n\n\tselfName := strings.TrimPrefix(selfInfo.Name, \"/\")\n\tcurrentImage := selfInfo.Config.Image\n\tnewServerImage := u.cfg.ServerImage + \":\" + newTag\n\n\t// Find the entrypoint binary path from the current image.\n\tentrypoint := \"/server\"\n\tif len(selfInfo.Config.Entrypoint) > 0 {\n\t\tentrypoint = selfInfo.Config.Entrypoint[0]\n\t}\n\n\thelperName := selfName + \"-updater-\" + fmt.Sprintf(\"%d\", time.Now().Unix())\n\n\thelperBody := ContainerCreateBody{\n\t\tImage: currentImage,\n\t\tCmd: []string{\n\t\t\tentrypoint, \"update-self\",\n\t\t\t\"--container\", selfID,\n\t\t\t\"--image\", newServerImage,\n\t\t\t\"--name\", selfName,\n\t\t},\n\t\tLabels: map[string]string{\n\t\t\t\"desent.updater\": \"true\",\n\t\t},\n\t\tHostConfig: &HostConfig{\n\t\t\tBinds:      []string{dockerSocket + \":\" + dockerSocket},\n\t\t\tAutoRemove: true,\n\t\t},\n\t}\n\n\t// Connect helper to the same networks as self.\n\tif len(selfInfo.NetworkSettings.Networks) > 0 {\n\t\thelperBody.NetworkingConfig = &NetworkingConfig{\n\t\t\tEndpointsConfig: make(map[string]EndpointConfig),\n\t\t}\n\t\tfor netName := range selfInfo.NetworkSettings.Networks {\n\t\t\thelperBody.NetworkingConfig.EndpointsConfig[netName] = EndpointConfig{}\n\t\t\tbreak // Only need one network for connectivity.\n\t\t}\n\t}\n\n\thelperID, err := u.docker.CreateContainer(ctx, helperName, helperBody)\n\tif err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to create helper container: %v\", err)})\n\t\treturn\n\t}\n\n\tif err := u.docker.StartContainer(ctx, helperID); err != nil {\n\t\tu.broadcast(Progress{Phase: PhaseFailed, Error: fmt.Sprintf(\"failed to start helper container: %v\", err)})\n\t\treturn\n\t}\n\n\tslog.Info(\"update: helper container launched\", \"id\", helperID, \"name\", helperName)\n\n\t// Send final restarting message. The server will be killed by the helper shortly.\n\tu.broadcast(Progress{\n\t\tPhase:   PhaseRestarting,\n\t\tPercent: 95,\n\t\tMessage: \"server is restarting with new version...\",\n\t})\n}\n\n// findContainerByService finds a container by its compose service label.\nfunc (u *Updater) findContainerByService(ctx context.Context, service string) (*ContainerSummary, error) {\n\tlabels := map[string]string{\n\t\t\"com.docker.compose.service\": service,\n\t}\n\tif u.cfg.ComposeProject != \"\" {\n\t\tlabels[\"com.docker.compose.project\"] = u.cfg.ComposeProject\n\t}\n\n\tcontainers, err := u.docker.ListContainers(ctx, labels)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tif len(containers) == 0 {\n\t\treturn nil, fmt.Errorf(\"no container found for service %q\", service)\n\t}\n\treturn &containers[0], nil\n}\n\n// RecreateContainer stops, removes, and recreates a container with a new image.\n// It preserves env, ports, volumes, networks, labels, and restart policy.\n// On failure after removal, it attempts rollback to the old image.\nfunc RecreateContainer(ctx context.Context, docker *dockerClient, containerID, newImage string) error {\n\tinfo, err := docker.InspectContainer(ctx, containerID)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"inspect: %w\", err)\n\t}\n\n\toldImage := info.Config.Image\n\tcontainerName := strings.TrimPrefix(info.Name, \"/\")\n\n\tslog.Info(\"update: recreating container\", \"name\", containerName, \"old_image\", oldImage, \"new_image\", newImage)\n\n\t// Stop.\n\tif err := docker.StopContainer(ctx, containerID, 30); err != nil {\n\t\treturn fmt.Errorf(\"stop: %w\", err)\n\t}\n\n\t// Remove.\n\tif err := docker.RemoveContainer(ctx, containerID); err != nil {\n\t\treturn fmt.Errorf(\"remove: %w\", err)\n\t}\n\n\t// Build create body from inspected config.\n\tbody := ContainerCreateBody{\n\t\tImage:        newImage,\n\t\tEnv:          info.Config.Env,\n\t\tCmd:          info.Config.Cmd,\n\t\tEntrypoint:   info.Config.Entrypoint,\n\t\tExposedPorts: info.Config.ExposedPorts,\n\t\tLabels:       info.Config.Labels,\n\t\tWorkingDir:   info.Config.WorkingDir,\n\t\tUser:         info.Config.User,\n\t\tHostConfig: &HostConfig{\n\t\t\tBinds:         info.HostConfig.Binds,\n\t\t\tPortBindings:  info.HostConfig.PortBindings,\n\t\t\tRestartPolicy: info.HostConfig.RestartPolicy,\n\t\t\tNetworkMode:   info.HostConfig.NetworkMode,\n\t\t},\n\t}\n\n\t// Preserve network connections.\n\tif len(info.NetworkSettings.Networks) > 0 {\n\t\tbody.NetworkingConfig = &NetworkingConfig{\n\t\t\tEndpointsConfig: make(map[string]EndpointConfig),\n\t\t}\n\t\tfor netName, endpoint := range info.NetworkSettings.Networks {\n\t\t\tbody.NetworkingConfig.EndpointsConfig[netName] = EndpointConfig{\n\t\t\t\tAliases: endpoint.Aliases,\n\t\t\t}\n\t\t}\n\t}\n\n\t// Create new container.\n\tnewID, err := docker.CreateContainer(ctx, containerName, body)\n\tif err != nil {\n\t\tslog.Error(\"update: create failed, attempting rollback\", \"err\", err)\n\t\t// Rollback: recreate from old image.\n\t\tbody.Image = oldImage\n\t\trollbackID, rbErr := docker.CreateContainer(ctx, containerName, body)\n\t\tif rbErr != nil {\n\t\t\treturn fmt.Errorf(\"create new container failed (%v) and rollback also failed (%v)\", err, rbErr)\n\t\t}\n\t\tif rbErr := docker.StartContainer(ctx, rollbackID); rbErr != nil {\n\t\t\treturn fmt.Errorf(\"create new container failed (%v) and rollback start failed (%v)\", err, rbErr)\n\t\t}\n\t\treturn fmt.Errorf(\"create new container failed (rolled back to old image): %w\", err)\n\t}\n\n\t// Start new container.\n\tif err := docker.StartContainer(ctx, newID); err != nil {\n\t\tslog.Error(\"update: start failed, attempting rollback\", \"err\", err)\n\t\t// Try to remove the new container and rollback.\n\t\t_ = docker.RemoveContainer(ctx, newID)\n\t\tbody.Image = oldImage\n\t\trollbackID, rbErr := docker.CreateContainer(ctx, containerName, body)\n\t\tif rbErr != nil {\n\t\t\treturn fmt.Errorf(\"start new container failed (%v) and rollback also failed (%v)\", err, rbErr)\n\t\t}\n\t\tif rbErr := docker.StartContainer(ctx, rollbackID); rbErr != nil {\n\t\t\treturn fmt.Errorf(\"start new container failed (%v) and rollback start failed (%v)\", err, rbErr)\n\t\t}\n\t\treturn fmt.Errorf(\"start new container failed (rolled back to old image): %w\", err)\n\t}\n\n\tslog.Info(\"update: container recreated\", \"name\", containerName, \"id\", newID)\n\treturn nil\n}\n\n// getSelfContainerID returns the container ID of the current process.\n// Docker sets the hostname to the container ID.\nfunc getSelfContainerID() (string, error) {\n\thostname, err := os.Hostname()\n\tif err != nil {\n\t\treturn \"\", fmt.Errorf(\"update: get hostname: %w\", err)\n\t}\n\tif len(hostname) < 12 {\n\t\treturn \"\", fmt.Errorf(\"update: hostname %q doesn't look like a container ID\", hostname)\n\t}\n\treturn hostname, nil\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/updater.go"
+          },
+          "timestamp": "2026-03-22T10:59:20.627Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/desent/internal/update/updater.go",
+          "timestamp": "2026-03-22T10:59:20.693Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "2"
+          },
+          "timestamp": "2026-03-22T10:59:24.408Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #2 status",
+          "timestamp": "2026-03-22T10:59:24.735Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "3"
+          },
+          "timestamp": "2026-03-22T10:59:28.357Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #3 status",
+          "timestamp": "2026-03-22T10:59:28.443Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "package update\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"log/slog\"\n\t\"net/http\"\n\n\t\"desent/internal/auth\"\n)\n\n// Handler exposes HTTP endpoints for the update system.\ntype Handler struct {\n\tupdater      *Updater\n\ttokenService *auth.TokenService\n}\n\n// NewHandler creates a new update Handler.\nfunc NewHandler(updater *Updater, tokenService *auth.TokenService) *Handler {\n\treturn &Handler{\n\t\tupdater:      updater,\n\t\ttokenService: tokenService,\n\t}\n}\n\n// RegisterRoutes registers update endpoints.\n// Check and apply use standard admin middleware (Bearer token).\n// Progress uses query-param auth (SSE/EventSource can't set headers).\nfunc (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {\n\tmux.Handle(\"GET /api/admin/update/check\", mw(http.HandlerFunc(h.checkUpdate)))\n\tmux.Handle(\"POST /api/admin/update/apply\", mw(http.HandlerFunc(h.applyUpdate)))\n\tmux.HandleFunc(\"GET /api/admin/update/progress\", h.streamProgress)\n}\n\nfunc (h *Handler) checkUpdate(w http.ResponseWriter, r *http.Request) {\n\tresult, err := h.updater.CheckForUpdate(r.Context())\n\tif err != nil {\n\t\tslog.Error(\"update: check failed\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": fmt.Sprintf(\"failed to check for update: %v\", err)})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, result)\n}\n\nfunc (h *Handler) applyUpdate(w http.ResponseWriter, r *http.Request) {\n\tif !SocketAvailable() {\n\t\twriteJSON(w, http.StatusServiceUnavailable, map[string]string{\n\t\t\t\"error\": \"Docker socket not available. Mount /var/run/docker.sock into the server container to enable updates.\",\n\t\t})\n\t\treturn\n\t}\n\n\tif h.updater.IsUpdating() {\n\t\twriteJSON(w, http.StatusConflict, map[string]string{\"error\": \"update already in progress\"})\n\t\treturn\n\t}\n\n\tif err := h.updater.Apply(r.Context()); err != nil {\n\t\tslog.Error(\"update: apply failed\", \"err\", err)\n\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"error\": err.Error()})\n\t\treturn\n\t}\n\n\twriteJSON(w, http.StatusAccepted, map[string]string{\"status\": \"update started\"})\n}\n\n// streamProgress serves an SSE stream of update progress.\n// Auth via ?token= query param (same pattern as WebSocket chat).\nfunc (h *Handler) streamProgress(w http.ResponseWriter, r *http.Request) {\n\t// Auth: token in query param.\n\ttoken := r.URL.Query().Get(\"token\")\n\tif token == \"\" {\n\t\thttp.Error(w, `{\"error\":\"missing token\"}`, http.StatusUnauthorized)\n\t\treturn\n\t}\n\tclaims, err := h.tokenService.Validate(token)\n\tif err != nil {\n\t\thttp.Error(w, `{\"error\":\"invalid token\"}`, http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif claims.Role != \"admin\" {\n\t\thttp.Error(w, `{\"error\":\"forbidden\"}`, http.StatusForbidden)\n\t\treturn\n\t}\n\n\tflusher, ok := w.(http.Flusher)\n\tif !ok {\n\t\thttp.Error(w, `{\"error\":\"streaming not supported\"}`, http.StatusInternalServerError)\n\t\treturn\n\t}\n\n\tw.Header().Set(\"Content-Type\", \"text/event-stream\")\n\tw.Header().Set(\"Cache-Control\", \"no-cache\")\n\tw.Header().Set(\"Connection\", \"keep-alive\")\n\tw.Header().Set(\"Access-Control-Allow-Origin\", \"*\")\n\n\tch := h.updater.Subscribe()\n\tdefer h.updater.Unsubscribe(ch)\n\n\tctx := r.Context()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase p, ok := <-ch:\n\t\t\tif !ok {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tdata, _ := json.Marshal(p)\n\t\t\tfmt.Fprintf(w, \"data: %s\\n\\n\", data)\n\t\t\tflusher.Flush()\n\t\t}\n\t}\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tjson.NewEncoder(w).Encode(v)\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/handler.go"
+          },
+          "timestamp": "2026-03-22T10:59:47.894Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/desent/internal/update/handler.go",
+          "timestamp": "2026-03-22T10:59:47.973Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "3"
+          },
+          "timestamp": "2026-03-22T10:59:51.276Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #3 status",
+          "timestamp": "2026-03-22T10:59:51.294Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "4"
+          },
+          "timestamp": "2026-03-22T10:59:55.523Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #4 status",
+          "timestamp": "2026-03-22T10:59:55.532Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now let me modify the config, main.go, and docker-compose.yml.",
+          "timestamp": "2026-03-22T10:59:59.646Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/config/config.go",
+            "new_string": "type Config struct {\n\tHTTPAddr            string\n\tDBPath              string\n\tJWTSecret           string\n\tBcryptCost          int\n\tStreamKey           string\n\tHLSDir              string\n\tRTMPAddr            string\n\tFFmpegPath          string\n\tChatMaxMsgLen       int\n\tChatRateLimitMS     int\n\tServerBandwidthMbps int\n\tHLSCacheMB          int\n\tLogLevel            string\n\tDataDir             string\n\tGitHubRepo          string\n\tDockerServerImage   string\n\tDockerWebImage      string\n\tComposeProject      string\n}",
+            "old_string": "type Config struct {\n\tHTTPAddr            string\n\tDBPath              string\n\tJWTSecret           string\n\tBcryptCost          int\n\tStreamKey           string\n\tHLSDir              string\n\tRTMPAddr            string\n\tFFmpegPath          string\n\tChatMaxMsgLen       int\n\tChatRateLimitMS     int\n\tServerBandwidthMbps int\n\tHLSCacheMB          int\n\tLogLevel            string\n\tDataDir             string\n}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:00:03.664Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/config/config.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:00:08.757Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/config/config.go",
+            "new_string": "\t\tLogLevel:            getEnv(\"LOG_LEVEL\", \"info\"),\n\t\tDataDir:             getEnv(\"DATA_DIR\", \"./data\"),\n\t\tGitHubRepo:          getEnv(\"GITHUB_REPO\", \"Desent-tech/desent\"),\n\t\tDockerServerImage:   getEnv(\"DOCKER_SERVER_IMAGE\", \"desent/server\"),\n\t\tDockerWebImage:      getEnv(\"DOCKER_WEB_IMAGE\", \"desent/web\"),\n\t\tComposeProject:      getEnv(\"COMPOSE_PROJECT\", \"desent\"),\n\t}",
+            "old_string": "\t\tLogLevel:            getEnv(\"LOG_LEVEL\", \"info\"),\n\t\tDataDir:             getEnv(\"DATA_DIR\", \"./data\"),\n\t}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:00:15.011Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/config/config.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:00:20.103Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now update `cmd/server/main.go` — add the update-self mode and wire the update handler.",
+          "timestamp": "2026-03-22T11:00:25.070Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go",
+            "new_string": "import (\n\t\"context\"\n\t\"encoding/json\"\n\t\"flag\"\n\t\"fmt\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"path/filepath\"\n\t\"strings\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"desent/internal/admin\"\n\t\"desent/internal/auth\"\n\t\"desent/internal/chat\"\n\t\"desent/internal/config\"\n\t\"desent/internal/db\"\n\t\"desent/internal/hls\"\n\t\"desent/internal/ingest\"\n\t\"desent/internal/setup\"\n\t\"desent/internal/update\"\n)",
+            "old_string": "import (\n\t\"context\"\n\t\"encoding/json\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"path/filepath\"\n\t\"strings\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"desent/internal/admin\"\n\t\"desent/internal/auth\"\n\t\"desent/internal/chat\"\n\t\"desent/internal/config\"\n\t\"desent/internal/db\"\n\t\"desent/internal/hls\"\n\t\"desent/internal/ingest\"\n\t\"desent/internal/setup\"\n)",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:00:28.309Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:00:33.400Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go",
+            "new_string": "func main() {\n\t// Handle update-self mode: a helper container uses this to recreate the server container.\n\tif len(os.Args) > 1 && os.Args[1] == \"update-self\" {\n\t\trunUpdateSelf()\n\t\treturn\n\t}\n\n\tcfg := config.Load()",
+            "old_string": "func main() {\n\tcfg := config.Load()",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:00:39.202Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:00:44.301Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now add the update handler wiring after the admin handler, and the `runUpdateSelf` function at the end.",
+          "timestamp": "2026-03-22T11:00:48.644Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go",
+            "new_string": "\tadminHandler.RegisterRoutes(mux, adminMW)\n\n\t// Update system\n\tupdater := update.NewUpdater(update.Config{\n\t\tCurrentVersion: version,\n\t\tGitHubRepo:     cfg.GitHubRepo,\n\t\tServerImage:    cfg.DockerServerImage,\n\t\tWebImage:       cfg.DockerWebImage,\n\t\tComposeProject: cfg.ComposeProject,\n\t\tDataDir:        cfg.DataDir,\n\t})\n\tupdateHandler := update.NewHandler(updater, tokenService)\n\tupdateHandler.RegisterRoutes(mux, adminMW)\n\n\t// Static files (test player)",
+            "old_string": "\tadminHandler.RegisterRoutes(mux, adminMW)\n\n\t// Static files (test player)",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:00:51.965Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:00:57.061Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now add the `runUpdateSelf` function at the end of main.go.",
+          "timestamp": "2026-03-22T11:01:01.910Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go",
+            "new_string": "\tif err := srv.Shutdown(shutdownCtx); err != nil {\n\t\tslog.Error(\"HTTP shutdown error\", \"err\", err)\n\t}\n\tslog.Info(\"server stopped\")\n}\n\n// runUpdateSelf is the helper mode: recreate the server container with a new image.\n// Launched by the main server as a short-lived helper container.\nfunc runUpdateSelf() {\n\tslog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{\n\t\tLevel: slog.LevelInfo,\n\t})))\n\n\tfs := flag.NewFlagSet(\"update-self\", flag.ExitOnError)\n\tcontainerID := fs.String(\"container\", \"\", \"container ID to recreate\")\n\tnewImage := fs.String(\"image\", \"\", \"new image to use\")\n\tcontainerName := fs.String(\"name\", \"\", \"container name (unused, for logging)\")\n\n\tif err := fs.Parse(os.Args[2:]); err != nil {\n\t\tslog.Error(\"update-self: parse flags\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n\n\tif *containerID == \"\" || *newImage == \"\" {\n\t\tfmt.Fprintf(os.Stderr, \"usage: %s update-self --container ID --image IMAGE [--name NAME]\\n\", os.Args[0])\n\t\tos.Exit(1)\n\t}\n\n\tslog.Info(\"update-self: starting\", \"container\", *containerID, \"image\", *newImage, \"name\", *containerName)\n\n\tctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)\n\tdefer cancel()\n\n\tdocker := update.NewDockerClientForHelper()\n\n\tif err := update.RecreateContainer(ctx, docker, *containerID, *newImage); err != nil {\n\t\tslog.Error(\"update-self: recreate failed\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n\n\tslog.Info(\"update-self: server container recreated successfully\")\n}",
+            "old_string": "\tif err := srv.Shutdown(shutdownCtx); err != nil {\n\t\tslog.Error(\"HTTP shutdown error\", \"err\", err)\n\t}\n\tslog.Info(\"server stopped\")\n}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:01:09.690Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:01:14.796Z"
+        },
+        {
+          "type": "assistant",
+          "text": "I need to export `NewDockerClientForHelper` from the update package since `main.go` needs to create a docker client for the helper mode. Let me add that.",
+          "timestamp": "2026-03-22T11:01:19.628Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "new_string": "// NewDockerClientForHelper creates a Docker client for use in the update-self helper.\nfunc NewDockerClientForHelper() *dockerClient {\n\treturn newDockerClient()\n}\n\nfunc newDockerClient() *dockerClient {",
+            "old_string": "func newDockerClient() *dockerClient {",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:01:21.243Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:01:26.337Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Also, `RecreateContainer` uses `*dockerClient` which is unexported. I need to make the docker client type and the `RecreateContainer` function work together properly. Since `RecreateContainer` is already exported and takes `*dockerClient`, I need to export the type or change the approach. Let me export the type minimally.",
+          "timestamp": "2026-03-22T11:01:32.039Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "limit": 30
+          },
+          "timestamp": "2026-03-22T11:01:32.380Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package update\n     2→\n     3→import (\n     4→\t\"bufio\"\n     5→\t\"context\"\n     6→\t\"encoding/json\"\n     7→\t\"fmt\"\n     8→\t\"io\"\n     9→\t\"net\"\n    10→\t\"net/http\"\n    11→\t\"net/url\"\n    12→\t\"os\"\n    13→\t\"strings\"\n    14→)\n    15→\n    16→const dockerSocket = \"/var/run/docker.sock\"\n    17→\n    18→// dockerClient talks to Docker Engine API via Unix socket.\n    19→type dockerClient struct {\n    20→\thttpClient *http.Client\n    21→}\n    22→\n    23→// NewDockerClientForHelper creates a Docker client for use in the update-self helper.\n    24→func NewDockerClientForHelper() *dockerClient {\n    25→\treturn newDockerClient()\n    26→}\n    27→\n    28→func newDockerClient() *dockerClient {\n    29→\treturn &dockerClient{\n    30→\t\thttpClient: &http.Client{",
+          "timestamp": "2026-03-22T11:01:32.427Z"
+        },
+        {
+          "type": "assistant",
+          "text": "The `dockerClient` type is unexported but `NewDockerClientForHelper` returns it. Since both `RecreateContainer` and the caller are in the same package for the updater, but `main.go` calls `RecreateContainer` with the result of `NewDockerClientForHelper`... Let me check — `RecreateContainer` takes `*dockerClient`. But `main.go` imports `update` package and calls `update.RecreateContainer(ctx, docker, ...)` where `docker` is `*update.dockerClient` (unexported type).\n\nThis won't compile. I need to either export the type or create a wrapper. The simplest approach: export the type.",
+          "timestamp": "2026-03-22T11:01:38.681Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "new_string": "// DockerClient talks to Docker Engine API via Unix socket.\ntype DockerClient struct {\n\thttpClient *http.Client\n}\n\n// NewDockerClient creates a Docker client for use externally (e.g., update-self helper).\nfunc NewDockerClient() *DockerClient {\n\treturn newDockerClient()\n}\n\nfunc newDockerClient() *DockerClient {",
+            "old_string": "// dockerClient talks to Docker Engine API via Unix socket.\ntype dockerClient struct {\n\thttpClient *http.Client\n}\n\n// NewDockerClientForHelper creates a Docker client for use in the update-self helper.\nfunc NewDockerClientForHelper() *dockerClient {\n\treturn newDockerClient()\n}\n\nfunc newDockerClient() *dockerClient {",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:01:41.130Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:01:46.232Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now I need to update all references from `*dockerClient` to `*DockerClient` throughout the update package.",
+          "timestamp": "2026-03-22T11:01:49.594Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "new_string": "func (c *DockerClient)",
+            "old_string": "func (c *dockerClient)",
+            "replace_all": true
+          },
+          "timestamp": "2026-03-22T11:01:50.605Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go has been updated. All occurrences of 'func (c *dockerClient)' were successfully replaced with 'func (c *DockerClient)'.",
+          "timestamp": "2026-03-22T11:01:55.899Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now update `updater.go` to use `DockerClient`.",
+          "timestamp": "2026-03-22T11:01:59.486Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/updater.go",
+            "new_string": "*DockerClient",
+            "old_string": "*dockerClient",
+            "replace_all": true
+          },
+          "timestamp": "2026-03-22T11:02:00.160Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/internal/update/updater.go has been updated. All occurrences of '*dockerClient' were successfully replaced with '*DockerClient'.",
+          "timestamp": "2026-03-22T11:02:05.294Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now update main.go to use the correct exported name.",
+          "timestamp": "2026-03-22T11:02:09.156Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go",
+            "new_string": "\tdocker := update.NewDockerClient()",
+            "old_string": "\tdocker := update.NewDockerClientForHelper()",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:02:10.283Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/cmd/server/main.go has been updated successfully.",
+          "timestamp": "2026-03-22T11:02:15.476Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now update docker-compose.yml.",
+          "timestamp": "2026-03-22T11:02:18.777Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/docker-compose.yml",
+            "new_string": "    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - db-data:/data\n      - ./data:/app/data\n    restart: unless-stopped",
+            "old_string": "    volumes:\n      - db-data:/data\n      - ./data:/app/data\n    restart: unless-stopped",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:02:20.177Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/docker-compose.yml has been updated successfully.",
+          "timestamp": "2026-03-22T11:02:25.614Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "4"
+          },
+          "timestamp": "2026-03-22T11:02:29.612Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #4 status",
+          "timestamp": "2026-03-22T11:02:29.666Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "5"
+          },
+          "timestamp": "2026-03-22T11:02:33.051Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #5 status",
+          "timestamp": "2026-03-22T11:02:33.111Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now the frontend changes. Let me add the TypeScript types, API client methods, nav item, and the update page.",
+          "timestamp": "2026-03-22T11:02:36.916Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-types.ts",
+            "new_string": "export type SetupCompleteResponse = {\n  token: string\n  role: string\n}\n\nexport type UpdateCheckResult = {\n  current_version: string\n  latest_version: string\n  update_available: boolean\n  release?: {\n    version: string\n    published_at: string\n    release_url: string\n    body: string\n  }\n  socket_available: boolean\n}\n\nexport type UpdateProgress = {\n  phase: \"idle\" | \"checking\" | \"downloading\" | \"applying\" | \"restarting\" | \"failed\" | \"complete\"\n  percent: number\n  bytes_downloaded: number\n  bytes_total: number\n  message: string\n  error?: string\n}",
+            "old_string": "export type SetupCompleteResponse = {\n  token: string\n  role: string\n}",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:02:41.011Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-types.ts has been updated successfully.",
+          "timestamp": "2026-03-22T11:02:46.124Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now add the API client methods and import the new types.",
+          "timestamp": "2026-03-22T11:02:49.434Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-client.ts",
+            "new_string": "import type {\n  AuthResponse,\n  StreamStatus,\n  ChatSessionsResponse,\n  ChatHistoryResponse,\n  AdminSettings,\n  UserInfo,\n  ServerStats,\n  QualitiesConfig,\n  SetupStatus,\n  SetupCompleteResponse,\n  UpdateCheckResult,\n} from \"./api-types\"",
+            "old_string": "import type {\n  AuthResponse,\n  StreamStatus,\n  ChatSessionsResponse,\n  ChatHistoryResponse,\n  AdminSettings,\n  UserInfo,\n  ServerStats,\n  QualitiesConfig,\n  SetupStatus,\n  SetupCompleteResponse,\n} from \"./api-types\"",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:02:52.370Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-client.ts has been updated successfully.",
+          "timestamp": "2026-03-22T11:02:57.501Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-client.ts",
+            "new_string": "  getIconUrl(): string {\n    return `${this.baseUrl}/api/icon`\n  }\n\n  // Update\n\n  checkForUpdate(): Promise<UpdateCheckResult> {\n    return this.get(\"/api/admin/update/check\")\n  }\n\n  async applyUpdate(): Promise<void> {\n    const token = this.getToken()\n    const headers: Record<string, string> = {}\n    if (token) headers[\"Authorization\"] = `Bearer ${token}`\n\n    const res = await fetch(`${this.baseUrl}/api/admin/update/apply`, {\n      method: \"POST\",\n      headers,\n    })\n\n    if (!res.ok) {\n      const data = await res.json().catch(() => ({}))\n      throw new ApiError(data.error || `request failed (${res.status})`, res.status)\n    }\n  }\n\n  subscribeUpdateProgress(onProgress: (data: import(\"./api-types\").UpdateProgress) => void): EventSource {\n    const token = this.getToken()\n    const url = `${this.baseUrl}/api/admin/update/progress?token=${encodeURIComponent(token || \"\")}`\n    const es = new EventSource(url)\n    es.onmessage = (e) => {\n      try {\n        const data = JSON.parse(e.data)\n        onProgress(data)\n      } catch { /* ignore parse errors */ }\n    }\n    return es\n  }\n\n  async getVersion(): Promise<{ version: string }> {\n    return this.get(\"/api/version\")\n  }",
+            "old_string": "  getIconUrl(): string {\n    return `${this.baseUrl}/api/icon`\n  }",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:03:07.890Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/lib/api-client.ts has been updated successfully.",
+          "timestamp": "2026-03-22T11:03:13.011Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now add the nav item in admin layout. Let me check what icons are available from Phosphor.",
+          "timestamp": "2026-03-22T11:03:17.550Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/layout.tsx",
+            "new_string": "import { ChartBar, GearSix, Users, List, X, ArrowsClockwise } from \"@phosphor-icons/react\"",
+            "old_string": "import { ChartBar, GearSix, Users, List, X } from \"@phosphor-icons/react\"",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:03:19.802Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/layout.tsx has been updated successfully.",
+          "timestamp": "2026-03-22T11:03:24.948Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/layout.tsx",
+            "new_string": "const navItems = [\n  { href: \"/admin\", label: \"dashboard\", icon: ChartBar },\n  { href: \"/admin/settings\", label: \"settings\", icon: GearSix },\n  { href: \"/admin/users\", label: \"users\", icon: Users },\n  { href: \"/admin/update\", label: \"update\", icon: ArrowsClockwise },\n]",
+            "old_string": "const navItems = [\n  { href: \"/admin\", label: \"dashboard\", icon: ChartBar },\n  { href: \"/admin/settings\", label: \"settings\", icon: GearSix },\n  { href: \"/admin/users\", label: \"users\", icon: Users },\n]",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:03:30.528Z"
+        },
+        {
+          "type": "user",
+          "text": "The file /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/layout.tsx has been updated successfully.",
+          "timestamp": "2026-03-22T11:03:35.661Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now create the update page.",
+          "timestamp": "2026-03-22T11:03:38.910Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/update",
+            "description": "Create update page directory"
+          },
+          "timestamp": "2026-03-22T11:03:39.443Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Let me read an existing admin page to nail the styling patterns exactly.",
+          "timestamp": "2026-03-22T11:03:43.273Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/settings/page.tsx"
+          },
+          "timestamp": "2026-03-22T11:03:44.003Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→\"use client\"\n     2→\n     3→import { useState, useEffect, useRef } from \"react\"\n     4→import { api } from \"@/lib/api-client\"\n     5→import { useToast } from \"@/components/toast\"\n     6→import type { QualitiesConfig } from \"@/lib/api-types\"\n     7→\n     8→const PRESET_INFO: Record<string, { cpu: string; quality: string }> = {\n     9→  auto: { cpu: \"auto\", quality: \"picks the best preset based on your CPU cores\" },\n    10→  ultrafast: { cpu: \"~5% CPU\", quality: \"noticeable blocky artifacts, best for 1-core VPS\" },\n    11→  superfast: { cpu: \"~10% CPU\", quality: \"visible artifacts on fast motion, okay for 1-2 cores\" },\n    12→  veryfast: { cpu: \"~15% CPU\", quality: \"minor artifacts on fast scenes, good balance for 2-4 cores\" },\n    13→  faster: { cpu: \"~25% CPU\", quality: \"clean picture, slight softness on high motion\" },\n    14→  fast: { cpu: \"~35% CPU\", quality: \"sharp picture, good for 4+ cores\" },\n    15→  medium: { cpu: \"~50% CPU\", quality: \"best quality, needs 8+ cores\" },\n    16→}\n    17→\n    18→const QUALITY_INFO: Record<string, { resolution: string; bitrate: string; hd: boolean }> = {\n    19→  \"2160p\": { resolution: \"3840x2160\", bitrate: \"20.2 Mbps\", hd: true },\n    20→  \"1440p\": { resolution: \"2560x1440\", bitrate: \"12.2 Mbps\", hd: true },\n    21→  \"1080p\": { resolution: \"1920x1080\", bitrate: \"6.1 Mbps\", hd: true },\n    22→  \"720p\": { resolution: \"1280x720\", bitrate: \"4.1 Mbps\", hd: true },\n    23→  \"480p\": { resolution: \"854x480\", bitrate: \"1.6 Mbps\", hd: false },\n    24→  \"360p\": { resolution: \"640x360\", bitrate: \"0.7 Mbps\", hd: false },\n    25→}\n    26→\n    27→export default function AdminSettingsPage() {\n    28→  const [loading, setLoading] = useState(true)\n    29→  const [qualities, setQualities] = useState<QualitiesConfig | null>(null)\n    30→  const [qualitySaving, setQualitySaving] = useState(false)\n    31→  const [iconFile, setIconFile] = useState<File | null>(null)\n    32→  const [iconPreview, setIconPreview] = useState<string | null>(null)\n    33→  const [iconSaving, setIconSaving] = useState(false)\n    34→  const [iconKey, setIconKey] = useState(0)\n    35→  const iconInputRef = useRef<HTMLInputElement>(null)\n    36→  const { toast } = useToast()\n    37→\n    38→  useEffect(() => {\n    39→    api\n    40→      .getAdminQualities()\n    41→      .then(setQualities)\n    42→      .catch(() => toast(\"failed to load settings\", \"error\"))\n    43→      .finally(() => setLoading(false))\n    44→  }, [toast])\n    45→\n    46→  const handleQualityToggle = async (name: string) => {\n    47→    if (!qualities) return\n    48→    const isEnabled = qualities.enabled.includes(name)\n    49→    let next: string[]\n    50→    if (isEnabled) {\n    51→      next = qualities.enabled.filter((q) => q !== name)\n    52→    } else {\n    53→      next = qualities.available.filter(\n    54→        (q) => qualities.enabled.includes(q) || q === name,\n    55→      )\n    56→    }\n    57→    if (next.length === 0) return\n    58→\n    59→    const prev = qualities\n    60→    setQualities({ ...qualities, enabled: next })\n    61→    setQualitySaving(true)\n    62→    try {\n    63→      const result = await api.updateAdminQualities(next)\n    64→      setQualities(result)\n    65→      if (result.restarted) {\n    66→        toast(\"qualities updated, stream restarting\")\n    67→      } else {\n    68→        toast(\"qualities updated\")\n    69→      }\n    70→    } catch {\n    71→      setQualities(prev)\n    72→      toast(\"failed to update qualities\", \"error\")\n    73→    } finally {\n    74→      setQualitySaving(false)\n    75→    }\n    76→  }\n    77→\n    78→  const handlePresetChange = async (newPreset: string) => {\n    79→    if (!qualities || qualities.preset === newPreset) return\n    80→\n    81→    const prev = qualities\n    82→    setQualities({ ...qualities, preset: newPreset })\n    83→    try {\n    84→      const result = await api.updateAdminQualities(qualities.enabled, undefined, newPreset)\n    85→      setQualities(result)\n    86→      if (result.restarted) {\n    87→        toast(\"preset updated, stream restarting\")\n    88→      } else {\n    89→        toast(\"preset updated\")\n    90→      }\n    91→    } catch {\n    92→      setQualities(prev)\n    93→      toast(\"failed to update preset\", \"error\")\n    94→    }\n    95→  }\n    96→\n    97→  const handleFpsToggle = async (qualityName: string, newFps: number) => {\n    98→    if (!qualities) return\n    99→    if (qualities.fps[qualityName] === newFps) return\n   100→\n   101→    const prev = qualities\n   102→    setQualities({ ...qualities, fps: { ...qualities.fps, [qualityName]: newFps } })\n   103→    try {\n   104→      const result = await api.updateAdminQualities(qualities.enabled, {\n   105→        [qualityName]: newFps,\n   106→      })\n   107→      setQualities(result)\n   108→      if (result.restarted) {\n   109→        toast(`${qualityName} set to ${newFps}fps, stream restarting`)\n   110→      } else {\n   111→        toast(`${qualityName} set to ${newFps}fps`)\n   112→      }\n   113→    } catch {\n   114→      setQualities(prev)\n   115→      toast(\"failed to update fps\", \"error\")\n   116→    }\n   117→  }\n   118→\n   119→  const handleIconChange = (e: React.ChangeEvent<HTMLInputElement>) => {\n   120→    const file = e.target.files?.[0]\n   121→    if (!file) return\n   122→    setIconFile(file)\n   123→    const reader = new FileReader()\n   124→    reader.onload = () => setIconPreview(reader.result as string)\n   125→    reader.readAsDataURL(file)\n   126→  }\n   127→\n   128→  const handleIconSave = async () => {\n   129→    if (!iconFile) return\n   130→    setIconSaving(true)\n   131→    try {\n   132→      await api.uploadIcon(iconFile)\n   133→      toast(\"icon updated\")\n   134→      setIconFile(null)\n   135→      setIconPreview(null)\n   136→      setIconKey((k) => k + 1)\n   137→    } catch {\n   138→      toast(\"failed to upload icon\", \"error\")\n   139→    } finally {\n   140→      setIconSaving(false)\n   141→    }\n   142→  }\n   143→\n   144→  if (loading) {\n   145→    return <p className=\"text-sm text-muted-foreground\">loading...</p>\n   146→  }\n   147→\n   148→  return (\n   149→    <div className=\"space-y-6\">\n   150→      <h1 className=\"text-xl font-bold\">settings</h1>\n   151→\n   152→      {/* Channel icon */}\n   153→      <div className=\"rounded-2xl bg-card border border-border p-5\">\n   154→        <p className=\"text-sm font-semibold\">channel icon</p>\n   155→        <p className=\"text-xs text-muted-foreground mt-1\">\n   156→          shown in the header and browser favicon\n   157→        </p>\n   158→        <div className=\"flex items-center gap-4 mt-3\">\n   159→          <div className=\"w-12 h-12 rounded-full bg-secondary overflow-hidden shrink-0\">\n   160→            {iconPreview ? (\n   161→              <img src={iconPreview} alt=\"preview\" className=\"w-full h-full object-cover\" />\n   162→            ) : (\n   163→              <img\n   164→                key={iconKey}\n   165→                src={api.getIconUrl()}\n   166→                alt=\"\"\n   167→                className=\"w-full h-full object-cover\"\n   168→                onError={(e) => {\n   169→                  (e.target as HTMLImageElement).style.display = \"none\"\n   170→                }}\n   171→              />\n   172→            )}\n   173→          </div>\n   174→          <div className=\"flex items-center gap-2\">\n   175→            <button\n   176→              onClick={() => iconInputRef.current?.click()}\n   177→              className=\"px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors\"\n   178→            >\n   179→              choose file\n   180→            </button>\n   181→            {iconFile && (\n   182→              <button\n   183→                onClick={handleIconSave}\n   184→                disabled={iconSaving}\n   185→                className=\"px-3 py-1.5 text-xs rounded-full bg-accent text-accent-foreground hover:opacity-80 transition-opacity disabled:opacity-50\"\n   186→              >\n   187→                {iconSaving ? \"saving...\" : \"save\"}\n   188→              </button>\n   189→            )}\n   190→          </div>\n   191→          <input\n   192→            ref={iconInputRef}\n   193→            type=\"file\"\n   194→            accept=\".png,.jpg,.jpeg,.svg,.ico\"\n   195→            onChange={handleIconChange}\n   196→            className=\"hidden\"\n   197→          />\n   198→        </div>\n   199→      </div>\n   200→\n   201→      {qualities && (\n   202→        <div className=\"space-y-4\">\n   203→          <div className=\"rounded-2xl bg-card border border-border p-5\">\n   204→            <p className=\"text-sm font-semibold\">encoding preset</p>\n   205→            <p className=\"text-xs text-muted-foreground mt-1\">\n   206→              auto uses {qualities.auto_preset} for your {qualities.cpu_cores}-core server\n   207→            </p>\n   208→            <div className=\"flex flex-wrap gap-2 mt-3\">\n   209→              {qualities.available_presets.map((p) => (\n   210→                <button\n   211→                  key={p}\n   212→                  onClick={() => handlePresetChange(p)}\n   213→                  className={`px-3 py-1.5 text-xs rounded-full transition-colors ${\n   214→                    qualities.preset === p\n   215→                      ? \"bg-accent text-accent-foreground\"\n   216→                      : \"bg-muted text-muted-foreground hover:bg-muted/80\"\n   217→                  }`}\n   218→                >\n   219→                  {p}\n   220→                </button>\n   221→              ))}\n   222→            </div>\n   223→            {PRESET_INFO[qualities.preset] && (\n   224→              <p className=\"text-xs text-muted-foreground mt-3\">\n   225→                {qualities.preset === \"auto\" ? (\n   226→                  PRESET_INFO[\"auto\"]?.quality\n   227→                ) : (\n   228→                  <>\n   229→                    <span className=\"text-foreground font-medium\">{PRESET_INFO[qualities.preset]?.cpu}</span>\n   230→                    {\" — \"}\n   231→                    {PRESET_INFO[qualities.preset]?.quality}\n   232→                  </>\n   233→                )}\n   234→              </p>\n   235→            )}\n   236→          </div>\n   237→\n   238→          <p className=\"text-sm font-semibold\">stream qualities</p>\n   239→\n   240→          <div className=\"grid grid-cols-1 sm:grid-cols-2 gap-3\">\n   241→            {qualities.available.map((name) => {\n   242→              const info = QUALITY_INFO[name]\n   243→              const enabled = qualities.enabled.includes(name)\n   244→              const isLast = enabled && qualities.enabled.length === 1\n   245→              const fps = info?.hd ? (qualities.fps[name] ?? 60) : 30\n   246→              return (\n   247→                <div\n   248→                  key={name}\n   249→                  className={`rounded-2xl border p-4 flex items-center justify-between transition-colors ${\n   250→                    enabled ? \"bg-card border-accent/40\" : \"bg-secondary border-border\"\n   251→                  }`}\n   252→                >\n   253→                  <div className=\"space-y-1.5\">\n   254→                    <p className=\"text-sm font-semibold\">{name}</p>\n   255→                    {info && (\n   256→                      <p className=\"text-xs text-muted-foreground\">\n   257→                        {info.resolution} &middot; {fps}fps &middot; {info.bitrate}\n   258→                      </p>\n   259→                    )}\n   260→                    {info?.hd && (\n   261→                      <div className=\"flex items-center gap-1\">\n   262→                        {[30, 60].map((f) => (\n   263→                          <button\n   264→                            key={f}\n   265→                            onClick={() => handleFpsToggle(name, f)}\n   266→                            className={`px-2 py-0.5 text-xs rounded-full transition-colors ${\n   267→                              fps === f\n   268→                                ? \"bg-accent text-accent-foreground\"\n   269→                                : \"bg-muted text-muted-foreground hover:bg-muted/80\"\n   270→                            }`}\n   271→                          >\n   272→                            {f}fps\n   273→                          </button>\n   274→                        ))}\n   275→                      </div>\n   276→                    )}\n   277→                  </div>\n   278→                  <button\n   279→                    onClick={() => handleQualityToggle(name)}\n   280→                    disabled={qualitySaving || isLast}\n   281→                    className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-30 ${\n   282→                      enabled ? \"bg-accent\" : \"bg-muted\"\n   283→                    }`}\n   284→                  >\n   285→                    <span\n   286→                      className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${\n   287→                        enabled ? \"translate-x-5\" : \"translate-x-0\"\n   288→                      }`}\n   289→                    />\n   290→                  </button>\n   291→                </div>\n   292→              )\n   293→            })}\n   294→          </div>\n   295→        </div>\n   296→      )}\n   297→    </div>\n   298→  )\n   299→}\n   300→",
+          "timestamp": "2026-03-22T11:03:44.073Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Good, I have the styling patterns. Now let me create the update page.",
+          "timestamp": "2026-03-22T11:03:48.027Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Write",
+          "input": {
+            "content": "\"use client\"\n\nimport { useState, useEffect, useCallback, useRef } from \"react\"\nimport { api, ApiError } from \"@/lib/api-client\"\nimport { useToast } from \"@/components/toast\"\nimport type { UpdateCheckResult, UpdateProgress } from \"@/lib/api-types\"\n\ntype PageState = \"loading\" | \"up-to-date\" | \"available\" | \"no-socket\" | \"updating\" | \"restarting\" | \"error\"\n\nexport default function AdminUpdatePage() {\n  const [state, setState] = useState<PageState>(\"loading\")\n  const [check, setCheck] = useState<UpdateCheckResult | null>(null)\n  const [progress, setProgress] = useState<UpdateProgress | null>(null)\n  const [error, setError] = useState<string | null>(null)\n  const [confirmOpen, setConfirmOpen] = useState(false)\n  const esRef = useRef<EventSource | null>(null)\n  const expectedVersion = useRef<string | null>(null)\n  const { toast } = useToast()\n\n  const loadCheck = useCallback(async () => {\n    setState(\"loading\")\n    setError(null)\n    try {\n      const result = await api.checkForUpdate()\n      setCheck(result)\n      if (!result.socket_available) {\n        setState(\"no-socket\")\n      } else if (result.update_available) {\n        setState(\"available\")\n      } else {\n        setState(\"up-to-date\")\n      }\n    } catch (err) {\n      setError(err instanceof Error ? err.message : \"failed to check for updates\")\n      setState(\"error\")\n    }\n  }, [])\n\n  useEffect(() => {\n    loadCheck()\n  }, [loadCheck])\n\n  // Clean up EventSource on unmount.\n  useEffect(() => {\n    return () => {\n      esRef.current?.close()\n    }\n  }, [])\n\n  const startUpdate = async () => {\n    setConfirmOpen(false)\n    setState(\"updating\")\n    setProgress(null)\n\n    // Subscribe to SSE progress.\n    esRef.current?.close()\n    esRef.current = api.subscribeUpdateProgress((data) => {\n      setProgress(data)\n      if (data.phase === \"restarting\") {\n        setState(\"restarting\")\n        esRef.current?.close()\n        if (check?.latest_version) {\n          expectedVersion.current = check.latest_version\n        }\n        pollForRestart()\n      }\n      if (data.phase === \"failed\") {\n        setState(\"error\")\n        setError(data.error || \"update failed\")\n        esRef.current?.close()\n      }\n    })\n    esRef.current.onerror = () => {\n      // If we're in restarting state, the connection drop is expected.\n      if (state !== \"restarting\") {\n        // Might be the server restarting — switch to polling.\n        setState(\"restarting\")\n        esRef.current?.close()\n        pollForRestart()\n      }\n    }\n\n    try {\n      await api.applyUpdate()\n    } catch (err) {\n      if (err instanceof ApiError) {\n        if (err.status === 409) {\n          toast(\"update already in progress\", \"error\")\n          return\n        }\n        if (err.status === 503) {\n          setState(\"no-socket\")\n          return\n        }\n      }\n      setState(\"error\")\n      setError(err instanceof Error ? err.message : \"failed to start update\")\n      esRef.current?.close()\n    }\n  }\n\n  const pollForRestart = () => {\n    let attempts = 0\n    const maxAttempts = 30\n\n    const poll = async () => {\n      attempts++\n      try {\n        const data = await api.getVersion()\n        const expected = expectedVersion.current\n        if (expected && data.version === expected) {\n          toast(\"updated successfully\")\n          window.location.reload()\n          return\n        }\n        // Version doesn't match yet or no expected version — check if server is at least up.\n        if (!expected && data.version) {\n          toast(\"server restarted\")\n          window.location.reload()\n          return\n        }\n      } catch {\n        // Server not ready yet.\n      }\n\n      if (attempts < maxAttempts) {\n        setTimeout(poll, 2000)\n      } else {\n        setState(\"error\")\n        setError(\"server did not come back after 60 seconds. check your deployment manually.\")\n      }\n    }\n\n    // Wait a bit before first poll — server needs time to stop and restart.\n    setTimeout(poll, 3000)\n  }\n\n  const formatBytes = (bytes: number): string => {\n    if (bytes === 0) return \"0 B\"\n    const k = 1024\n    const sizes = [\"B\", \"KB\", \"MB\", \"GB\"]\n    const i = Math.floor(Math.log(bytes) / Math.log(k))\n    return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`\n  }\n\n  const phaseLabel = (phase: string): string => {\n    switch (phase) {\n      case \"checking\": return \"checking for updates...\"\n      case \"downloading\": return \"downloading images...\"\n      case \"applying\": return \"updating containers...\"\n      case \"restarting\": return \"restarting server...\"\n      default: return phase\n    }\n  }\n\n  return (\n    <div className=\"space-y-6\">\n      <h1 className=\"text-xl font-bold\">update</h1>\n\n      {state === \"loading\" && (\n        <p className=\"text-sm text-muted-foreground\">loading...</p>\n      )}\n\n      {state === \"up-to-date\" && check && (\n        <div className=\"rounded-2xl bg-card border border-border p-5 space-y-3\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2 h-2 rounded-full bg-green-500\" />\n            <p className=\"text-sm font-semibold\">up to date</p>\n          </div>\n          <p className=\"text-xs text-muted-foreground\">\n            current version: <span className=\"text-foreground font-medium\">{check.current_version}</span>\n          </p>\n          <button\n            onClick={loadCheck}\n            className=\"px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors\"\n          >\n            check again\n          </button>\n        </div>\n      )}\n\n      {state === \"available\" && check && check.release && (\n        <>\n          <div className=\"rounded-2xl bg-card border border-accent/40 p-5 space-y-4\">\n            <div className=\"flex items-center gap-2\">\n              <div className=\"w-2 h-2 rounded-full bg-accent\" />\n              <p className=\"text-sm font-semibold\">update available</p>\n            </div>\n            <div className=\"space-y-1\">\n              <p className=\"text-xs text-muted-foreground\">\n                current: <span className=\"text-foreground font-medium\">{check.current_version}</span>\n                {\" \\u2192 \"}\n                new: <span className=\"text-accent font-medium\">{check.latest_version}</span>\n              </p>\n              <p className=\"text-xs text-muted-foreground\">\n                released {new Date(check.release.published_at).toLocaleDateString()}\n              </p>\n            </div>\n            {check.release.body && (\n              <div className=\"rounded-xl bg-secondary p-3\">\n                <p className=\"text-xs font-semibold mb-1\">changelog</p>\n                <p className=\"text-xs text-muted-foreground whitespace-pre-wrap\">{check.release.body}</p>\n              </div>\n            )}\n            <div className=\"flex gap-2\">\n              <button\n                onClick={() => setConfirmOpen(true)}\n                className=\"px-4 py-2 text-xs rounded-full bg-accent text-accent-foreground hover:opacity-80 transition-opacity\"\n              >\n                update now\n              </button>\n              {check.release.release_url && (\n                <a\n                  href={check.release.release_url}\n                  target=\"_blank\"\n                  rel=\"noopener noreferrer\"\n                  className=\"px-3 py-2 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors\"\n                >\n                  view on github\n                </a>\n              )}\n            </div>\n          </div>\n\n          {/* Confirmation dialog */}\n          {confirmOpen && (\n            <div className=\"fixed inset-0 z-50 flex items-center justify-center\">\n              <div className=\"absolute inset-0 bg-black/50\" onClick={() => setConfirmOpen(false)} />\n              <div className=\"relative bg-card rounded-2xl border border-border p-6 w-full max-w-md mx-4 space-y-4\">\n                <p className=\"text-sm font-semibold\">confirm update</p>\n                <p className=\"text-xs text-muted-foreground\">\n                  this will update the server from {check.current_version} to {check.latest_version}.\n                  the server will briefly restart during the update. viewers may experience a short interruption.\n                </p>\n                <div className=\"flex gap-2 justify-end\">\n                  <button\n                    onClick={() => setConfirmOpen(false)}\n                    className=\"px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors\"\n                  >\n                    cancel\n                  </button>\n                  <button\n                    onClick={startUpdate}\n                    className=\"px-4 py-1.5 text-xs rounded-full bg-accent text-accent-foreground hover:opacity-80 transition-opacity\"\n                  >\n                    update\n                  </button>\n                </div>\n              </div>\n            </div>\n          )}\n        </>\n      )}\n\n      {state === \"no-socket\" && (\n        <div className=\"rounded-2xl bg-card border border-border p-5 space-y-3\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2 h-2 rounded-full bg-yellow-500\" />\n            <p className=\"text-sm font-semibold\">docker socket not available</p>\n          </div>\n          <p className=\"text-xs text-muted-foreground\">\n            the update feature requires the Docker socket to be mounted into the server container.\n            add this to your docker-compose.yml:\n          </p>\n          <div className=\"rounded-xl bg-secondary p-3\">\n            <code className=\"text-xs text-foreground\">\n              volumes:<br />\n              &nbsp;&nbsp;- /var/run/docker.sock:/var/run/docker.sock\n            </code>\n          </div>\n          {check && (\n            <p className=\"text-xs text-muted-foreground\">\n              current version: <span className=\"text-foreground font-medium\">{check.current_version}</span>\n              {check.update_available && (\n                <> &middot; latest: <span className=\"text-accent font-medium\">{check.latest_version}</span></>\n              )}\n            </p>\n          )}\n        </div>\n      )}\n\n      {state === \"updating\" && (\n        <div className=\"rounded-2xl bg-card border border-border p-5 space-y-4\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2 h-2 rounded-full bg-accent animate-pulse\" />\n            <p className=\"text-sm font-semibold\">updating...</p>\n          </div>\n          {progress && (\n            <>\n              <p className=\"text-xs text-muted-foreground\">{progress.message || phaseLabel(progress.phase)}</p>\n              <div className=\"space-y-1\">\n                <div className=\"w-full h-2 bg-secondary rounded-full overflow-hidden\">\n                  <div\n                    className=\"h-full bg-accent rounded-full transition-all duration-300\"\n                    style={{ width: `${progress.percent}%` }}\n                  />\n                </div>\n                <div className=\"flex justify-between text-xs text-muted-foreground\">\n                  <span>{phaseLabel(progress.phase)}</span>\n                  <span>\n                    {progress.bytes_total > 0\n                      ? `${formatBytes(progress.bytes_downloaded)} / ${formatBytes(progress.bytes_total)}`\n                      : `${progress.percent}%`}\n                  </span>\n                </div>\n              </div>\n            </>\n          )}\n        </div>\n      )}\n\n      {state === \"restarting\" && (\n        <div className=\"rounded-2xl bg-card border border-border p-5 space-y-3\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2 h-2 rounded-full bg-accent animate-pulse\" />\n            <p className=\"text-sm font-semibold\">server is restarting...</p>\n          </div>\n          <p className=\"text-xs text-muted-foreground\">\n            waiting for the new version to come online. this page will reload automatically.\n          </p>\n          <div className=\"w-full h-2 bg-secondary rounded-full overflow-hidden\">\n            <div className=\"h-full bg-accent rounded-full animate-pulse\" style={{ width: \"100%\" }} />\n          </div>\n        </div>\n      )}\n\n      {state === \"error\" && (\n        <div className=\"rounded-2xl bg-card border border-destructive/40 p-5 space-y-3\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2 h-2 rounded-full bg-destructive\" />\n            <p className=\"text-sm font-semibold\">update failed</p>\n          </div>\n          <p className=\"text-xs text-destructive\">{error}</p>\n          <button\n            onClick={loadCheck}\n            className=\"px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors\"\n          >\n            try again\n          </button>\n        </div>\n      )}\n    </div>\n  )\n}\n",
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/update/page.tsx"
+          },
+          "timestamp": "2026-03-22T11:04:59.767Z"
+        },
+        {
+          "type": "user",
+          "text": "File created successfully at: /Users/m.ovchinnikov/GolandProjects/desent/web/desent-web/apps/web/app/admin/update/page.tsx",
+          "timestamp": "2026-03-22T11:05:00.097Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "completed",
+            "taskId": "5"
+          },
+          "timestamp": "2026-03-22T11:05:03.759Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #5 status",
+          "timestamp": "2026-03-22T11:05:03.764Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "TaskUpdate",
+          "input": {
+            "status": "in_progress",
+            "taskId": "6"
+          },
+          "timestamp": "2026-03-22T11:05:08.488Z"
+        },
+        {
+          "type": "user",
+          "text": "Updated task #6 status",
+          "timestamp": "2026-03-22T11:05:08.495Z"
+        },
+        {
+          "type": "assistant",
+          "text": "Now let me verify the Go code compiles.",
+          "timestamp": "2026-03-22T11:05:12.340Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Bash",
+          "input": {
+            "command": "go build ./cmd/server 2>&1",
+            "description": "Build Go server to check for compilation errors"
+          },
+          "timestamp": "2026-03-22T11:05:13.591Z"
+        },
+        {
+          "type": "user",
+          "text": "Exit code 1\n# desent/internal/update\ninternal/update/docker.go:29:10: undefined: dockerClient\n\n# desent/internal/update\ninternal/update/docker.go:29:10: undefined: dockerClient",
+          "timestamp": "2026-03-22T11:05:14.144Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Read",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "limit": 40
+          },
+          "timestamp": "2026-03-22T11:05:17.988Z"
+        },
+        {
+          "type": "user",
+          "text": "     1→package update\n     2→\n     3→import (\n     4→\t\"bufio\"\n     5→\t\"context\"\n     6→\t\"encoding/json\"\n     7→\t\"fmt\"\n     8→\t\"io\"\n     9→\t\"net\"\n    10→\t\"net/http\"\n    11→\t\"net/url\"\n    12→\t\"os\"\n    13→\t\"strings\"\n    14→)\n    15→\n    16→const dockerSocket = \"/var/run/docker.sock\"\n    17→\n    18→// DockerClient talks to Docker Engine API via Unix socket.\n    19→type DockerClient struct {\n    20→\thttpClient *http.Client\n    21→}\n    22→\n    23→// NewDockerClient creates a Docker client for use externally (e.g., update-self helper).\n    24→func NewDockerClient() *DockerClient {\n    25→\treturn newDockerClient()\n    26→}\n    27→\n    28→func newDockerClient() *DockerClient {\n    29→\treturn &dockerClient{\n    30→\t\thttpClient: &http.Client{\n    31→\t\t\tTransport: &http.Transport{\n    32→\t\t\t\tDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {\n    33→\t\t\t\t\treturn net.Dial(\"unix\", dockerSocket)\n    34→\t\t\t\t},\n    35→\t\t\t},\n    36→\t\t},\n    37→\t}\n    38→}\n    39→\n    40→// SocketAvailable checks if Docker socket is accessible.",
+          "timestamp": "2026-03-22T11:05:18.055Z"
+        },
+        {
+          "type": "assistant",
+          "text": "The `newDockerClient` function still references `dockerClient` (old name) in its return statement.",
+          "timestamp": "2026-03-22T11:05:21.628Z"
+        },
+        {
+          "type": "tool_use",
+          "name": "Edit",
+          "input": {
+            "file_path": "/Users/m.ovchinnikov/GolandProjects/desent/internal/update/docker.go",
+            "new_string": "\treturn &DockerClient{",
+            "old_string": "\treturn &dockerClient{",
+            "replace_all": false
+          },
+          "timestamp": "2026-03-22T11:05:22.807Z"
+        }
+      ],
+      "total_additions": 20554,
+      "total_deletions": 171,
+      "accepted_lines": 1920,
+      "overriden_lines": 0
+    }
+  }
+}

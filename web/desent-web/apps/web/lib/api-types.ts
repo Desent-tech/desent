@@ -79,3 +79,12 @@ export type QualitiesConfig = {
   cpu_cores: number
   restarted?: boolean
 }
+
+export type SetupStatus = {
+  setup_required: boolean
+}
+
+export type SetupCompleteResponse = {
+  token: string
+  role: string
+}

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -30,19 +31,23 @@ type IngestManager interface {
 	StartedAt() time.Time
 }
 
+var allowedIconExts = []string{".png", ".jpg", ".jpeg", ".svg", ".ico"}
+
 type Handler struct {
 	store     *Store
 	ingestMgr IngestManager
 	hlsDir    string
 	defaultBW int
+	dataDir   string
 }
 
-func NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int) *Handler {
+func NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int, dataDir string) *Handler {
 	return &Handler{
 		store:     store,
 		ingestMgr: ingestMgr,
 		hlsDir:    hlsDir,
 		defaultBW: defaultBW,
+		dataDir:   dataDir,
 	}
 }
 
@@ -55,6 +60,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.
 	mux.Handle("GET /api/admin/stats", mw(http.HandlerFunc(h.getStats)))
 	mux.Handle("GET /api/admin/qualities", mw(http.HandlerFunc(h.getQualities)))
 	mux.Handle("PUT /api/admin/qualities", mw(http.HandlerFunc(h.updateQualities)))
+	mux.Handle("POST /api/admin/icon", mw(http.HandlerFunc(h.uploadIcon)))
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +340,57 @@ func dirSizeMB(dir string) float64 {
 		return nil
 	})
 	return float64(total) / 1024.0 / 1024.0
+}
+
+func (h *Handler) uploadIcon(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(1 << 20); err != nil { // 1MB max
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form data"})
+		return
+	}
+
+	file, header, err := r.FormFile("icon")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "icon file is required"})
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !isAllowedIconExt(ext) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported icon format, allowed: png, jpg, jpeg, svg, ico"})
+		return
+	}
+
+	// Remove existing icon files
+	for _, e := range allowedIconExts {
+		os.Remove(filepath.Join(h.dataDir, "icon"+e))
+	}
+
+	dst, err := os.Create(filepath.Join(h.dataDir, "icon"+ext))
+	if err != nil {
+		slog.Error("admin: create icon file", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save icon"})
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		slog.Error("admin: write icon file", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save icon"})
+		return
+	}
+
+	slog.Info("admin: icon updated")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func isAllowedIconExt(ext string) bool {
+	for _, a := range allowedIconExts {
+		if a == ext {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

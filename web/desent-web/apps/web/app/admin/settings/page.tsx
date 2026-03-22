@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { api } from "@/lib/api-client"
 import { useToast } from "@/components/toast"
 import type { QualitiesConfig } from "@/lib/api-types"
@@ -28,6 +28,11 @@ export default function AdminSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [qualities, setQualities] = useState<QualitiesConfig | null>(null)
   const [qualitySaving, setQualitySaving] = useState(false)
+  const [iconFile, setIconFile] = useState<File | null>(null)
+  const [iconPreview, setIconPreview] = useState<string | null>(null)
+  const [iconSaving, setIconSaving] = useState(false)
+  const [iconKey, setIconKey] = useState(0)
+  const iconInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -111,6 +116,31 @@ export default function AdminSettingsPage() {
     }
   }
 
+  const handleIconChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setIconFile(file)
+    const reader = new FileReader()
+    reader.onload = () => setIconPreview(reader.result as string)
+    reader.readAsDataURL(file)
+  }
+
+  const handleIconSave = async () => {
+    if (!iconFile) return
+    setIconSaving(true)
+    try {
+      await api.uploadIcon(iconFile)
+      toast("icon updated")
+      setIconFile(null)
+      setIconPreview(null)
+      setIconKey((k) => k + 1)
+    } catch {
+      toast("failed to upload icon", "error")
+    } finally {
+      setIconSaving(false)
+    }
+  }
+
   if (loading) {
     return <p className="text-sm text-muted-foreground">loading...</p>
   }
@@ -118,6 +148,55 @@ export default function AdminSettingsPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold">settings</h1>
+
+      {/* Channel icon */}
+      <div className="rounded-2xl bg-card border border-border p-5">
+        <p className="text-sm font-semibold">channel icon</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          shown in the header and browser favicon
+        </p>
+        <div className="flex items-center gap-4 mt-3">
+          <div className="w-12 h-12 rounded-full bg-secondary overflow-hidden shrink-0">
+            {iconPreview ? (
+              <img src={iconPreview} alt="preview" className="w-full h-full object-cover" />
+            ) : (
+              <img
+                key={iconKey}
+                src={api.getIconUrl()}
+                alt=""
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none"
+                }}
+              />
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => iconInputRef.current?.click()}
+              className="px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+            >
+              choose file
+            </button>
+            {iconFile && (
+              <button
+                onClick={handleIconSave}
+                disabled={iconSaving}
+                className="px-3 py-1.5 text-xs rounded-full bg-accent text-accent-foreground hover:opacity-80 transition-opacity disabled:opacity-50"
+              >
+                {iconSaving ? "saving..." : "save"}
+              </button>
+            )}
+          </div>
+          <input
+            ref={iconInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg,.svg,.ico"
+            onChange={handleIconChange}
+            className="hidden"
+          />
+        </div>
+      </div>
 
       {qualities && (
         <div className="space-y-4">

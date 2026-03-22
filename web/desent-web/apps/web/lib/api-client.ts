@@ -7,6 +7,8 @@ import type {
   UserInfo,
   ServerStats,
   QualitiesConfig,
+  SetupStatus,
+  SetupCompleteResponse,
 } from "./api-types"
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL
@@ -155,6 +157,55 @@ class ApiClient {
     if (fps !== undefined) body.fps = fps
     if (preset !== undefined) body.preset = preset
     return this.put("/api/admin/qualities", body)
+  }
+
+  // Setup
+
+  getSetupStatus(): Promise<SetupStatus> {
+    return this.get("/api/setup/status")
+  }
+
+  async completeSetup(username: string, password: string, icon?: File): Promise<SetupCompleteResponse> {
+    const form = new FormData()
+    form.append("username", username)
+    form.append("password", password)
+    if (icon) form.append("icon", icon)
+
+    const res = await fetch(`${this.baseUrl}/api/setup/complete`, {
+      method: "POST",
+      body: form,
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new ApiError(data.error || `request failed (${res.status})`, res.status)
+    }
+
+    return res.json() as Promise<SetupCompleteResponse>
+  }
+
+  getIconUrl(): string {
+    return `${this.baseUrl}/api/icon`
+  }
+
+  async uploadIcon(icon: File): Promise<void> {
+    const form = new FormData()
+    form.append("icon", icon)
+
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers["Authorization"] = `Bearer ${token}`
+
+    const res = await fetch(`${this.baseUrl}/api/admin/icon`, {
+      method: "POST",
+      headers,
+      body: form,
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new ApiError(data.error || `request failed (${res.status})`, res.status)
+    }
   }
 }
 

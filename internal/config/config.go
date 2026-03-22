@@ -21,6 +21,7 @@ type Config struct {
 	ServerBandwidthMbps int
 	HLSCacheMB          int
 	LogLevel            string
+	DataDir             string
 }
 
 func Load() *Config {
@@ -38,6 +39,7 @@ func Load() *Config {
 		ServerBandwidthMbps: getEnvInt("SERVER_BANDWIDTH_MBPS", 100),
 		HLSCacheMB:          getEnvInt("HLS_CACHE_MB", 128),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
+		DataDir:             getEnv("DATA_DIR", "./data"),
 	}
 }
 

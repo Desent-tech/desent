@@ -12,8 +12,10 @@ services:
       - HTTP_ADDR=:8080
       - RTMP_ADDR=0.0.0.0:1935
       - LOG_LEVEL=info
+      - DATA_DIR=/app/data
     volumes:
       - db-data:/data
+      - ./data:/app/data
     restart: unless-stopped
 
   web:

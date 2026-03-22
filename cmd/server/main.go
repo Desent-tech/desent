@@ -19,6 +19,7 @@ import (
 	"desent/internal/db"
 	"desent/internal/hls"
 	"desent/internal/ingest"
+	"desent/internal/setup"
 )
 
 // Set via -ldflags at build time.
@@ -48,6 +49,12 @@ func main() {
 	slog.Info("starting desent", "version", version)
 	if cfg.JWTSecret == "" {
 		slog.Error("JWT_SECRET environment variable is required")
+		os.Exit(1)
+	}
+
+	// Data directory
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		slog.Error("failed to create data dir", "path", cfg.DataDir, "err", err)
 		os.Exit(1)
 	}
 
@@ -143,6 +150,11 @@ func main() {
 	authHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost)
 	authHandler.RegisterRoutes(mux)
 
+	// Setup
+	setupStore := setup.NewStore(database)
+	setupHandler := setup.NewHandler(setupStore, authStore, tokenService, cfg.BcryptCost, cfg.DataDir)
+	setupHandler.RegisterRoutes(mux)
+
 	// Chat
 	chatStore := chat.NewStore(database)
 	chatHub := chat.NewHub(chatStore, ingestMgr, adminStore)
@@ -157,7 +169,7 @@ func main() {
 	mux.HandleFunc("GET /api/stream/status", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore))
 
 	// Admin API
-	adminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps)
+	adminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps, cfg.DataDir)
 	adminMW := func(h http.Handler) http.Handler {
 		return auth.RequireAuth(tokenService)(auth.RequireAdmin(h))
 	}

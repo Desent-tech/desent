@@ -15,6 +15,7 @@ RUN apk add --no-cache ffmpeg
 COPY --from=builder /server /server
 
 WORKDIR /app
+RUN mkdir -p /app/data
 
 EXPOSE 8080 1935
 

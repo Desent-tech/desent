@@ -1,17 +1,30 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
 import { useAuth } from "@/hooks/use-auth"
+import { useFavicon } from "@/hooks/use-favicon"
+import { api } from "@/lib/api-client"
 
 export function Header() {
   const { user, logout } = useAuth()
+  const [iconError, setIconError] = useState(false)
+  useFavicon()
 
   return (
     <header className="sticky top-0 z-50 backdrop-blur-xl bg-background/80 border-b border-border">
       <div className="max-w-[1440px] mx-auto px-3 lg:px-5">
         <div className="h-14 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <Link href="/" className="text-lg font-bold tracking-tight hover:opacity-70 transition-opacity">
+            <Link href="/" className="flex items-center gap-2 text-lg font-bold tracking-tight hover:opacity-70 transition-opacity">
+              {!iconError && (
+                <img
+                  src={api.getIconUrl()}
+                  alt=""
+                  className="w-6 h-6 rounded"
+                  onError={() => setIconError(true)}
+                />
+              )}
               desent
             </Link>
             <nav className="hidden sm:flex items-center gap-4">

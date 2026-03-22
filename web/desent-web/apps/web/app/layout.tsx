@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from "next/font/google"
 import "@workspace/ui/globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { ToastProvider } from "@/components/toast"
+import { SetupGuard } from "@/components/setup-guard"
 import { cn } from "@workspace/ui/lib/utils"
 
 const inter = Inter({
@@ -33,7 +34,9 @@ export default function RootLayout({
     >
       <body>
         <ThemeProvider>
-          <ToastProvider>{children}</ToastProvider>
+          <ToastProvider>
+            <SetupGuard>{children}</SetupGuard>
+          </ToastProvider>
         </ThemeProvider>
       </body>
     </html>

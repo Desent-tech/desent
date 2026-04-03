@@ -8,6 +8,7 @@ export type StreamStatus = {
   qualities: string[]
   fps: Record<string, number>
   title: string
+  viewers: number
 }
 
 export type ChatSession = {

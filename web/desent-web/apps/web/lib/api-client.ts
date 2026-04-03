@@ -92,6 +92,14 @@ class ApiClient {
     return this.post("/api/auth/register", { username, password })
   }
 
+  changePassword(currentPassword: string, newPassword: string): Promise<{ status: string }> {
+    return this.put("/api/auth/password", { current_password: currentPassword, new_password: newPassword })
+  }
+
+  refreshToken(): Promise<AuthResponse> {
+    return this.post("/api/auth/refresh")
+  }
+
   // Stream
 
   getStreamStatus(): Promise<StreamStatus> {

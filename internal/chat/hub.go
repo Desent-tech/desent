@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,6 +16,11 @@ type LiveChecker interface {
 // TitleProvider returns the current stream title.
 type TitleProvider interface {
 	GetStreamTitle(ctx context.Context) string
+}
+
+// BanChecker checks if a user is banned.
+type BanChecker interface {
+	IsBanned(ctx context.Context, userID int64) (bool, error)
 }
 
 // Message is the internal broadcast envelope.
@@ -32,10 +38,12 @@ type Hub struct {
 	register      chan *Client
 	unregister    chan *Client
 	broadcast     chan *Message
+	kick          chan int64
 	liveCheck     LiveChecker
 	titleProvider TitleProvider
 	sessionID     int64 // current active session (0 = no stream)
 	wasLive       bool
+	viewerCount   atomic.Int64
 }
 
 func NewHub(store *Store, lc LiveChecker, tp TitleProvider) *Hub {
@@ -45,9 +53,20 @@ func NewHub(store *Store, lc LiveChecker, tp TitleProvider) *Hub {
 		register:      make(chan *Client),
 		unregister:    make(chan *Client),
 		broadcast:     make(chan *Message, 256),
+		kick:          make(chan int64, 16),
 		liveCheck:     lc,
 		titleProvider: tp,
 	}
+}
+
+// ViewerCount returns the current number of connected chat clients.
+func (h *Hub) ViewerCount() int {
+	return int(h.viewerCount.Load())
+}
+
+// Kick disconnects all clients with the given user ID.
+func (h *Hub) Kick(userID int64) {
+	h.kick <- userID
 }
 
 // Run is the main event loop. Must be called in a goroutine.
@@ -63,6 +82,7 @@ func (h *Hub) Run(ctx context.Context) {
 
 		case client := <-h.register:
 			h.clients[client] = true
+			h.viewerCount.Add(1)
 			slog.Info("chat: client connected", "username", client.username, "clients", len(h.clients))
 			h.broadcastSystem(client.username + " joined")
 
@@ -70,8 +90,19 @@ func (h *Hub) Run(ctx context.Context) {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
+				h.viewerCount.Add(-1)
 				slog.Info("chat: client disconnected", "username", client.username, "clients", len(h.clients))
 				h.broadcastSystem(client.username + " left")
+			}
+
+		case userID := <-h.kick:
+			for client := range h.clients {
+				if client.userID == userID {
+					delete(h.clients, client)
+					close(client.send)
+					h.viewerCount.Add(-1)
+					slog.Info("chat: kicked banned user", "username", client.username, "user_id", userID)
+				}
 			}
 
 		case msg := <-h.broadcast:

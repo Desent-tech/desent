@@ -33,21 +33,28 @@ type IngestManager interface {
 
 var allowedIconExts = []string{".png", ".jpg", ".jpeg", ".svg", ".ico"}
 
+// UserKicker kicks a user from chat by user ID.
+type UserKicker interface {
+	Kick(userID int64)
+}
+
 type Handler struct {
 	store     *Store
 	ingestMgr IngestManager
 	hlsDir    string
 	defaultBW int
 	dataDir   string
+	kicker    UserKicker
 }
 
-func NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int, dataDir string) *Handler {
+func NewHandler(store *Store, ingestMgr IngestManager, hlsDir string, defaultBW int, dataDir string, kicker UserKicker) *Handler {
 	return &Handler{
 		store:     store,
 		ingestMgr: ingestMgr,
 		hlsDir:    hlsDir,
 		defaultBW: defaultBW,
 		dataDir:   dataDir,
+		kicker:    kicker,
 	}
 }
 
@@ -140,6 +147,7 @@ func (h *Handler) banUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	h.kicker.Kick(req.UserID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
 }
 

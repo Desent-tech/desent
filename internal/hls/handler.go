@@ -95,7 +95,12 @@ type TitleProvider interface {
 	GetStreamTitle(ctx context.Context) string
 }
 
-func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSProvider, tp TitleProvider) http.HandlerFunc {
+// ViewerCounter reports the current number of connected viewers.
+type ViewerCounter interface {
+	ViewerCount() int
+}
+
+func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSProvider, tp TitleProvider, vc ViewerCounter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -103,6 +108,7 @@ func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSPr
 			"qualities": ql.EnabledQualities(),
 			"fps":       fp.QualityFPS(),
 			"title":     tp.GetStreamTitle(r.Context()),
+			"viewers":   vc.ViewerCount(),
 		})
 	}
 }

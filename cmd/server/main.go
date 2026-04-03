@@ -156,8 +156,14 @@ func main() {
 	// Auth
 	authStore := auth.NewStore(database)
 	tokenService := auth.NewTokenService(cfg.JWTSecret)
-	authHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost)
+	authRateLimiter := auth.NewRateLimiter(10, time.Minute)
+	go authRateLimiter.StartCleanup(ctx)
+	authHandler := auth.NewHandler(authStore, tokenService, cfg.BcryptCost, authRateLimiter)
 	authHandler.RegisterRoutes(mux)
+	authMW := func(h http.Handler) http.Handler {
+		return auth.RequireAuth(tokenService)(h)
+	}
+	authHandler.RegisterProtectedRoutes(mux, authMW)
 
 	// Setup
 	setupStore := setup.NewStore(database)
@@ -169,16 +175,16 @@ func main() {
 	chatHub := chat.NewHub(chatStore, ingestMgr, adminStore)
 	go chatHub.Run(ctx)
 
-	chatHandler := chat.NewHandler(chatHub, chatStore, tokenService, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)
+	chatHandler := chat.NewHandler(chatHub, chatStore, tokenService, adminStore, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)
 	chatHandler.RegisterRoutes(mux)
 
 	// HLS streaming
 	hlsHandler := hls.NewHandler(cfg.HLSDir, segmentCache)
 	hlsHandler.RegisterRoutes(mux)
-	mux.HandleFunc("GET /api/stream/status", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore))
+	mux.HandleFunc("GET /api/stream/status", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore, chatHub))
 
 	// Admin API
-	adminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps, cfg.DataDir)
+	adminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps, cfg.DataDir, chatHub)
 	adminMW := func(h http.Handler) http.Handler {
 		return auth.RequireAuth(tokenService)(auth.RequireAdmin(h))
 	}

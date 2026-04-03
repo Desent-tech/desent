@@ -76,3 +76,29 @@ func (s *Store) GetByUsername(ctx context.Context, username string) (*User, erro
 	}
 	return u, nil
 }
+
+func (s *Store) GetByID(ctx context.Context, id int64) (*User, error) {
+	u := &User{}
+	err := s.db.Read.QueryRowContext(ctx,
+		"SELECT id, username, password_hash, role FROM users WHERE id = ?",
+		id,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("auth: get user by id: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) UpdatePassword(ctx context.Context, userID int64, newHash string) error {
+	_, err := s.db.Write.ExecContext(ctx,
+		"UPDATE users SET password_hash = ? WHERE id = ?",
+		newHash, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("auth: update password: %w", err)
+	}
+	return nil
+}

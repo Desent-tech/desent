@@ -7,6 +7,7 @@ import { api } from "@/lib/api-client"
 import type { StreamStatus } from "@/lib/api-types"
 import { VideoPlayer } from "@/components/video-player"
 import { Header } from "@/components/header"
+import { useToast } from "@/components/toast"
 
 type Message = {
   id: number
@@ -18,10 +19,11 @@ type Message = {
 
 export default function StreamPage() {
   const { user, logout } = useAuth()
+  const { toast } = useToast()
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState("")
   const [selectedQuality, setSelectedQuality] = useState("720p")
-  const [streamStatus, setStreamStatus] = useState<StreamStatus>({ live: false, qualities: [], fps: {}, title: "Live Stream" })
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>({ live: false, qualities: [], fps: {}, title: "Live Stream", viewers: 0 })
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState("")
   const [wsConnected, setWsConnected] = useState(false)
@@ -79,8 +81,11 @@ export default function StreamPage() {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setWsConnected(false)
+      if (event.code === 4003) {
+        toast("You have been banned from chat", "error")
+      }
     }
 
     ws.onerror = () => {
@@ -239,9 +244,9 @@ export default function StreamPage() {
                 <p className="text-2xl lg:text-3xl font-bold tracking-tight">{selectedQuality}</p>
               </div>
               <div className="bg-secondary rounded-2xl p-5 flex flex-col justify-between min-h-[100px]">
-                <p className="text-xs text-muted-foreground">chat</p>
+                <p className="text-xs text-muted-foreground">viewers</p>
                 <p className="text-2xl lg:text-3xl font-bold tracking-tight">
-                  {wsConnected ? "on" : "off"}
+                  {streamStatus.viewers}
                 </p>
               </div>
             </div>

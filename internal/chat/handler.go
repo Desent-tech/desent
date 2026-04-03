@@ -15,15 +15,17 @@ type Handler struct {
 	hub          *Hub
 	store        *Store
 	tokenService *auth.TokenService
+	banChecker   BanChecker
 	maxMsgLen    int
 	rateLimitMS  int
 }
 
-func NewHandler(hub *Hub, store *Store, ts *auth.TokenService, maxMsgLen, rateLimitMS int) *Handler {
+func NewHandler(hub *Hub, store *Store, ts *auth.TokenService, bc BanChecker, maxMsgLen, rateLimitMS int) *Handler {
 	return &Handler{
 		hub:          hub,
 		store:        store,
 		tokenService: ts,
+		banChecker:   bc,
 		maxMsgLen:    maxMsgLen,
 		rateLimitMS:  rateLimitMS,
 	}
@@ -45,6 +47,17 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.tokenService.Validate(token)
 	if err != nil {
 		http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+		return
+	}
+
+	banned, err := h.banChecker.IsBanned(r.Context(), claims.UserID)
+	if err != nil {
+		slog.Error("chat: check ban", "err", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if banned {
+		http.Error(w, `{"error":"you are banned"}`, http.StatusForbidden)
 		return
 	}
 

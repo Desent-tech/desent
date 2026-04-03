@@ -1,6 +1,7 @@
 import type {
   AuthResponse,
   StreamStatus,
+  ChatSession,
   ChatSessionsResponse,
   ChatHistoryResponse,
   AdminSettings,
@@ -10,6 +11,8 @@ import type {
   SetupStatus,
   SetupCompleteResponse,
   UpdateCheckResult,
+  Emote,
+  Clip,
 } from "./api-types"
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL
@@ -111,6 +114,10 @@ class ApiClient {
   }
 
   // Chat
+
+  getChatSession(sessionId: number): Promise<ChatSession> {
+    return this.get(`/api/chat/sessions/${sessionId}`)
+  }
 
   getChatSessions(limit?: number): Promise<ChatSessionsResponse> {
     const params: Record<string, string> = {}
@@ -276,6 +283,83 @@ class ApiClient {
       const data = await res.json().catch(() => ({}))
       throw new ApiError(data.error || `request failed (${res.status})`, res.status)
     }
+  }
+
+  // VODs
+
+  getVodUrl(filename: string): string {
+    // Extract just the filename from a full path
+    const parts = filename.split("/")
+    return `${this.baseUrl}/vods/${parts[parts.length - 1]}`
+  }
+
+  getThumbnailUrl(): string {
+    return `${this.baseUrl}/api/stream/thumbnail`
+  }
+
+  getVodThumbnailUrl(sessionId: number): string {
+    return `${this.baseUrl}/vods/${sessionId}_thumb.jpg`
+  }
+
+  // Emotes
+
+  getEmotes(): Promise<Emote[]> {
+    return this.get("/api/emotes")
+  }
+
+  async uploadEmote(code: string, file: File): Promise<Emote> {
+    const form = new FormData()
+    form.append("code", code)
+    form.append("image", file)
+
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers["Authorization"] = `Bearer ${token}`
+
+    const res = await fetch(`${this.baseUrl}/api/admin/emotes`, {
+      method: "POST",
+      headers,
+      body: form,
+    })
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new ApiError(data.error || `request failed (${res.status})`, res.status)
+    }
+
+    return res.json() as Promise<Emote>
+  }
+
+  deleteEmote(id: number): Promise<{ status: string }> {
+    return this.delete(`/api/admin/emotes/${id}`)
+  }
+
+  getEmoteUrl(filename: string): string {
+    return `${this.baseUrl}/api/emotes/${filename}`
+  }
+
+  // Clips
+
+  createClip(sessionId: number, startTime: number, duration: number, title: string): Promise<{ id: number; filename: string; status: string }> {
+    return this.post("/api/clips", { session_id: sessionId, start_time: startTime, duration, title })
+  }
+
+  getClips(sessionId: number): Promise<Clip[]> {
+    return this.get("/api/clips", { session_id: String(sessionId) })
+  }
+
+  getRecentClips(limit?: number): Promise<Clip[]> {
+    const params: Record<string, string> = {}
+    if (limit !== undefined) params.limit = String(limit)
+    return this.get("/api/clips/recent", params)
+  }
+
+  deleteClip(id: number): Promise<{ status: string }> {
+    return this.delete(`/api/admin/clips/${id}`)
+  }
+
+  getClipUrl(filename: string): string {
+    return `${this.baseUrl}/clips/${filename}`
   }
 }
 

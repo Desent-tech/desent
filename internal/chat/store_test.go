@@ -30,7 +30,7 @@ func TestCreateAndCloseSessions(t *testing.T) {
 	store := NewStore(d)
 	ctx := context.Background()
 
-	id, err := store.CreateSession(ctx, "Test Stream")
+	id, err := store.CreateSession(ctx, "Test Stream", "", "")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestSaveAndGetMessages(t *testing.T) {
 	store := NewStore(d)
 	ctx := context.Background()
 
-	sessionID, _ := store.CreateSession(ctx, "Chat Test")
+	sessionID, _ := store.CreateSession(ctx, "Chat Test", "", "")
 
 	store.SaveMessage(ctx, sessionID, 1, "testuser", "hello")
 	store.SaveMessage(ctx, sessionID, 1, "testuser", "world")
@@ -84,7 +84,7 @@ func TestDeleteMessage(t *testing.T) {
 	store := NewStore(d)
 	ctx := context.Background()
 
-	sessionID, _ := store.CreateSession(ctx, "Delete Test")
+	sessionID, _ := store.CreateSession(ctx, "Delete Test", "", "")
 	store.SaveMessage(ctx, sessionID, 1, "testuser", "to be deleted")
 	store.SaveMessage(ctx, sessionID, 1, "testuser", "keep this")
 
@@ -161,7 +161,7 @@ func TestGetMessages_Pagination(t *testing.T) {
 	store := NewStore(d)
 	ctx := context.Background()
 
-	sessionID, _ := store.CreateSession(ctx, "Pagination Test")
+	sessionID, _ := store.CreateSession(ctx, "Pagination Test", "", "")
 
 	for i := 0; i < 5; i++ {
 		store.SaveMessage(ctx, sessionID, 1, "testuser", "msg")

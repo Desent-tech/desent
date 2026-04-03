@@ -36,6 +36,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/chat", h.handleWS)
 	mux.HandleFunc("GET /api/chat/history/{sessionId}", h.handleHistory)
 	mux.HandleFunc("GET /api/chat/sessions", h.handleSessions)
+	mux.HandleFunc("GET /api/chat/sessions/{sessionId}", h.handleGetSession)
 }
 
 func (h *Handler) RegisterModRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {
@@ -156,6 +157,24 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"sessions": sessions,
 	})
+}
+
+func (h *Handler) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := strconv.ParseInt(r.PathValue("sessionId"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid session id"}`, http.StatusBadRequest)
+		return
+	}
+
+	session, err := h.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		slog.Error("chat: get session", "err", err)
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(session)
 }
 
 func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {

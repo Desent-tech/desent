@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func buildFFmpegArgs(rtmpURL, hlsDir string, qualities []Quality, preset string) []string {
+func buildFFmpegArgs(rtmpURL, hlsDir string, qualities []Quality, preset, vodPath string) []string {
 	args := []string{
 		"-listen", "1",
 		"-i", rtmpURL,
@@ -55,6 +55,18 @@ func buildFFmpegArgs(rtmpURL, hlsDir string, qualities []Quality, preset string)
 		"-hls_segment_filename", fmt.Sprintf("%s/%%v/seg%%03d.ts", hlsDir),
 		fmt.Sprintf("%s/%%v/index.m3u8", hlsDir),
 	)
+
+	// VOD recording — second output: copy-codec MP4 (zero extra CPU)
+	// Maps must come AFTER the HLS output path so they apply to this output, not HLS.
+	if vodPath != "" {
+		args = append(args,
+			"-map", "0:v:0", "-map", "0:a:0",
+			"-c:v", "copy", "-c:a", "copy",
+			"-f", "mp4",
+			"-movflags", "+frag_keyframe+empty_moov",
+			vodPath,
+		)
+	}
 
 	return args
 }

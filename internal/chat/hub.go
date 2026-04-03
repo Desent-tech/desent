@@ -16,6 +16,18 @@ type LiveChecker interface {
 // TitleProvider returns the current stream title.
 type TitleProvider interface {
 	GetStreamTitle(ctx context.Context) string
+	GetStreamCategory(ctx context.Context) string
+	GetStreamTags(ctx context.Context) string
+}
+
+// VODPathProvider returns the path of the current VOD being recorded.
+type VODPathProvider interface {
+	CurrentVODPath() string
+}
+
+// ThumbnailCopier copies the current live thumbnail for a specific session.
+type ThumbnailCopier interface {
+	CopyForSession(sessionID int64)
 }
 
 // BanChecker checks if a user is banned.
@@ -34,31 +46,35 @@ type Message struct {
 }
 
 type Hub struct {
-	store         *Store
-	clients       map[*Client]bool
-	register      chan *Client
-	unregister    chan *Client
-	broadcast     chan *Message
-	kick          chan int64
-	deleteMsg     chan int64
-	liveCheck     LiveChecker
-	titleProvider TitleProvider
-	sessionID     int64 // current active session (0 = no stream)
-	wasLive       bool
-	viewerCount   atomic.Int64
+	store           *Store
+	clients         map[*Client]bool
+	register        chan *Client
+	unregister      chan *Client
+	broadcast       chan *Message
+	kick            chan int64
+	deleteMsg       chan int64
+	liveCheck       LiveChecker
+	titleProvider   TitleProvider
+	vodPathProvider VODPathProvider
+	thumbCopier     ThumbnailCopier
+	sessionID       int64 // current active session (0 = no stream)
+	wasLive         bool
+	viewerCount     atomic.Int64
 }
 
-func NewHub(store *Store, lc LiveChecker, tp TitleProvider) *Hub {
+func NewHub(store *Store, lc LiveChecker, tp TitleProvider, vp VODPathProvider, tc ThumbnailCopier) *Hub {
 	return &Hub{
-		store:         store,
-		clients:       make(map[*Client]bool),
-		register:      make(chan *Client),
-		unregister:    make(chan *Client),
-		broadcast:     make(chan *Message, 256),
-		kick:          make(chan int64, 16),
-		deleteMsg:     make(chan int64, 64),
-		liveCheck:     lc,
-		titleProvider: tp,
+		store:           store,
+		clients:         make(map[*Client]bool),
+		register:        make(chan *Client),
+		unregister:      make(chan *Client),
+		broadcast:       make(chan *Message, 256),
+		kick:            make(chan int64, 16),
+		deleteMsg:       make(chan int64, 64),
+		liveCheck:       lc,
+		titleProvider:   tp,
+		vodPathProvider: vp,
+		thumbCopier:     tc,
 	}
 }
 
@@ -158,9 +174,11 @@ func (h *Hub) checkLiveStatus(ctx context.Context) {
 	live := h.liveCheck.IsLive()
 
 	if live && !h.wasLive {
-		// Stream just started — create a new session with current title
+		// Stream just started — create a new session with current title, category, tags
 		title := h.titleProvider.GetStreamTitle(ctx)
-		id, err := h.store.CreateSession(ctx, title)
+		category := h.titleProvider.GetStreamCategory(ctx)
+		tags := h.titleProvider.GetStreamTags(ctx)
+		id, err := h.store.CreateSession(ctx, title, category, tags)
 		if err != nil {
 			slog.Error("chat: create session", "err", err)
 		} else {
@@ -171,8 +189,16 @@ func (h *Hub) checkLiveStatus(ctx context.Context) {
 	}
 
 	if !live && h.wasLive {
-		// Stream just ended — close session
+		// Stream just ended — close session, persist VOD path, copy thumbnail
 		if h.sessionID > 0 {
+			if vodPath := h.vodPathProvider.CurrentVODPath(); vodPath != "" {
+				if err := h.store.SetVODPath(ctx, h.sessionID, vodPath); err != nil {
+					slog.Error("chat: set vod path", "err", err)
+				}
+			}
+			if h.thumbCopier != nil {
+				h.thumbCopier.CopyForSession(h.sessionID)
+			}
 			if err := h.store.CloseSession(ctx, h.sessionID); err != nil {
 				slog.Error("chat: close session", "err", err)
 			}

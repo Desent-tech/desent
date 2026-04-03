@@ -19,11 +19,14 @@ import (
 	"desent/internal/admin"
 	"desent/internal/auth"
 	"desent/internal/chat"
+	"desent/internal/clip"
 	"desent/internal/config"
 	"desent/internal/db"
+	"desent/internal/emote"
 	"desent/internal/hls"
 	"desent/internal/ingest"
 	"desent/internal/setup"
+	"desent/internal/thumbnail"
 	"desent/internal/update"
 )
 
@@ -132,12 +135,33 @@ func main() {
 		slog.Info("generated new stream key", "key", streamKey)
 	}
 
+	// VOD directory
+	if err := os.MkdirAll(cfg.VODDir, 0755); err != nil {
+		slog.Error("failed to create VOD dir", "path", cfg.VODDir, "err", err)
+		os.Exit(1)
+	}
+
+	// Clips directory
+	clipsDir := filepath.Join(cfg.DataDir, "clips")
+	if err := os.MkdirAll(clipsDir, 0755); err != nil {
+		slog.Error("failed to create clips dir", "path", clipsDir, "err", err)
+		os.Exit(1)
+	}
+
+	// Emotes directory
+	emotesDir := filepath.Join(cfg.DataDir, "emotes")
+	if err := os.MkdirAll(emotesDir, 0755); err != nil {
+		slog.Error("failed to create emotes dir", "path", emotesDir, "err", err)
+		os.Exit(1)
+	}
+
 	// Ingest (FFmpeg subprocess)
 	ingestMgr := ingest.NewManager(ingest.Config{
 		FFmpegPath: cfg.FFmpegPath,
 		RTMPAddr:   cfg.RTMPAddr,
 		StreamKey:  streamKey,
 		HLSDir:     cfg.HLSDir,
+		VODDir:     cfg.VODDir,
 		OnStreamEnd: func() {
 			hls.CleanAll(cfg.HLSDir)
 			segmentCache.Purge()
@@ -166,6 +190,10 @@ func main() {
 
 	// HLS segment cleaner
 	hls.StartCleaner(ctx, cfg.HLSDir, 30*time.Second, 60*time.Second)
+
+	// Thumbnail generator
+	thumbGen := thumbnail.NewGenerator(cfg.HLSDir, cfg.DataDir, cfg.FFmpegPath, ingestMgr)
+	go thumbGen.Run(ctx)
 
 	// Routes
 	mux := http.NewServeMux()
@@ -199,7 +227,7 @@ func main() {
 
 	// Chat
 	chatStore := chat.NewStore(database)
-	chatHub := chat.NewHub(chatStore, ingestMgr, adminStore)
+	chatHub := chat.NewHub(chatStore, ingestMgr, adminStore, ingestMgr, thumbGen)
 	go chatHub.Run(ctx)
 
 	chatHandler := chat.NewHandler(chatHub, chatStore, tokenService, adminStore, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)
@@ -210,9 +238,14 @@ func main() {
 	chatHandler.RegisterModRoutes(mux, modMW)
 
 	// HLS streaming
-	hlsHandler := hls.NewHandler(cfg.HLSDir, segmentCache)
+	hlsHandler := hls.NewHandler(cfg.HLSDir, segmentCache, cfg.VODDir, cfg.DataDir)
 	hlsHandler.RegisterRoutes(mux)
-	mux.HandleFunc("GET /api/stream/status", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore, chatHub))
+	mux.HandleFunc("GET /api/stream/status", hlsHandler.StreamStatusHandler(ingestMgr, ingestMgr, ingestMgr, adminStore, chatHub, adminStore))
+
+	// Emotes
+	emoteStore := emote.NewStore(database)
+	emoteHandler := emote.NewHandler(emoteStore, emotesDir)
+	emoteHandler.RegisterRoutes(mux)
 
 	// Admin API
 	adminHandler := admin.NewHandler(adminStore, ingestMgr, cfg.HLSDir, cfg.ServerBandwidthMbps, cfg.DataDir, chatHub)
@@ -220,6 +253,13 @@ func main() {
 		return auth.RequireAuth(tokenService)(auth.RequireAdmin(h))
 	}
 	adminHandler.RegisterRoutes(mux, adminMW)
+	emoteHandler.RegisterAdminRoutes(mux, adminMW)
+
+	// Clips
+	clipStore := clip.NewStore(database)
+	clipHandler := clip.NewHandler(clipStore, clipsDir, cfg.FFmpegPath, cfg.ClipMaxDuration, chatStore)
+	clipHandler.RegisterRoutes(mux, authMW)
+	clipHandler.RegisterAdminRoutes(mux, adminMW)
 
 	// Update system
 	updater := update.NewUpdater(update.Config{

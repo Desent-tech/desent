@@ -28,6 +28,9 @@ export default function AdminSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [qualities, setQualities] = useState<QualitiesConfig | null>(null)
   const [qualitySaving, setQualitySaving] = useState(false)
+  const [category, setCategory] = useState("")
+  const [tags, setTags] = useState("")
+  const [categorySaving, setCategorySaving] = useState(false)
   const [iconFile, setIconFile] = useState<File | null>(null)
   const [iconPreview, setIconPreview] = useState<string | null>(null)
   const [iconSaving, setIconSaving] = useState(false)
@@ -72,12 +75,30 @@ export default function AdminSettingsPage() {
   }
 
   useEffect(() => {
-    api
-      .getAdminQualities()
-      .then(setQualities)
+    Promise.all([
+      api.getAdminQualities(),
+      api.getAdminSettings(),
+    ])
+      .then(([q, s]) => {
+        setQualities(q)
+        setCategory(s.stream_category || "")
+        setTags(s.stream_tags || "")
+      })
       .catch(() => toast("failed to load settings", "error"))
       .finally(() => setLoading(false))
   }, [toast])
+
+  const handleCategorySave = async () => {
+    setCategorySaving(true)
+    try {
+      await api.updateAdminSettings({ stream_category: category, stream_tags: tags })
+      toast("category & tags saved")
+    } catch {
+      toast("failed to save", "error")
+    } finally {
+      setCategorySaving(false)
+    }
+  }
 
   const handleQualityToggle = async (name: string) => {
     if (!qualities) return
@@ -232,6 +253,43 @@ export default function AdminSettingsPage() {
             className="hidden"
           />
         </div>
+      </div>
+
+      {/* Category & tags */}
+      <div className="rounded-2xl bg-card border border-border p-5 space-y-3">
+        <p className="text-sm font-semibold">stream category & tags</p>
+        <p className="text-xs text-muted-foreground">
+          shown on the stream page and saved with each session
+        </p>
+        <div className="space-y-2">
+          <div>
+            <label className="text-xs text-muted-foreground">category</label>
+            <input
+              type="text"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="Just Chatting, Gaming, Music..."
+              className="w-full mt-1 px-3 py-2 bg-secondary border border-border rounded-lg text-sm outline-none focus:ring-2 focus:ring-accent/30"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground">tags</label>
+            <input
+              type="text"
+              value={tags}
+              onChange={(e) => setTags(e.target.value)}
+              placeholder="fps, competitive, english..."
+              className="w-full mt-1 px-3 py-2 bg-secondary border border-border rounded-lg text-sm outline-none focus:ring-2 focus:ring-accent/30"
+            />
+          </div>
+        </div>
+        <button
+          onClick={handleCategorySave}
+          disabled={categorySaving}
+          className="px-4 py-2 text-sm bg-accent text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          {categorySaving ? "saving..." : "save"}
+        </button>
       </div>
 
       {/* Stream key */}

@@ -3,8 +3,10 @@ package ingest
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -19,18 +21,20 @@ type Config struct {
 	RTMPAddr    string
 	StreamKey   string
 	HLSDir      string
+	VODDir      string
 	OnStreamEnd func() // called after FFmpeg exits (stream ends)
 }
 
 type Manager struct {
-	cfg          Config
-	mu           sync.Mutex
-	cmd          *exec.Cmd
-	running      bool
-	qualities    []Quality
-	fpsOverrides map[string]int
-	preset       string
-	startedAt    time.Time
+	cfg            Config
+	mu             sync.Mutex
+	cmd            *exec.Cmd
+	running        bool
+	qualities      []Quality
+	fpsOverrides   map[string]int
+	preset         string
+	startedAt      time.Time
+	currentVODPath string
 }
 
 func NewManager(cfg Config) *Manager {
@@ -79,6 +83,13 @@ func (m *Manager) GetStreamKey() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cfg.StreamKey
+}
+
+// CurrentVODPath returns the path to the current VOD file being recorded.
+func (m *Manager) CurrentVODPath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.currentVODPath
 }
 
 // SetPreset updates the x264 preset. Use "auto" for CPU-based auto-detection.
@@ -238,7 +249,13 @@ func (m *Manager) runFFmpeg(ctx context.Context) error {
 
 	quals = ApplyFPSOverrides(quals, overrides)
 
-	cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, buildFFmpegArgs(rtmpURL, m.cfg.HLSDir, quals, preset)...)
+	// Generate VOD path if VOD directory is configured
+	var vodPath string
+	if m.cfg.VODDir != "" {
+		vodPath = filepath.Join(m.cfg.VODDir, fmt.Sprintf("%d.mp4", time.Now().Unix()))
+	}
+
+	cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, buildFFmpegArgs(rtmpURL, m.cfg.HLSDir, quals, preset, vodPath)...)
 	cmd.WaitDelay = 5 * time.Second
 
 	stderr, err := cmd.StderrPipe()
@@ -249,16 +266,18 @@ func (m *Manager) runFFmpeg(ctx context.Context) error {
 	m.mu.Lock()
 	m.cmd = cmd
 	m.running = true
+	m.currentVODPath = vodPath
 	m.mu.Unlock()
 
 	if err := cmd.Start(); err != nil {
 		m.mu.Lock()
 		m.running = false
+		m.currentVODPath = ""
 		m.mu.Unlock()
 		return err
 	}
 
-	slog.Info("ingest: FFmpeg started", "pid", cmd.Process.Pid, "qualities", qualityNames(quals), "preset", preset)
+	slog.Info("ingest: FFmpeg started", "pid", cmd.Process.Pid, "qualities", qualityNames(quals), "preset", preset, "vod", vodPath)
 
 	go func() {
 		scanner := bufio.NewScanner(stderr)

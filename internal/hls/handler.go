@@ -11,19 +11,25 @@ import (
 )
 
 type Handler struct {
-	hlsDir string
-	cache  *SegmentCache
+	hlsDir  string
+	cache   *SegmentCache
+	vodDir  string
+	dataDir string
 }
 
-func NewHandler(hlsDir string, cache *SegmentCache) *Handler {
+func NewHandler(hlsDir string, cache *SegmentCache, vodDir, dataDir string) *Handler {
 	return &Handler{
-		hlsDir: hlsDir,
-		cache:  cache,
+		hlsDir:  hlsDir,
+		cache:   cache,
+		vodDir:  vodDir,
+		dataDir: dataDir,
 	}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /live/", h.serveHLS())
+	mux.HandleFunc("GET /vods/{filename}", h.serveVOD)
+	mux.HandleFunc("GET /api/stream/thumbnail", h.serveThumbnail)
 }
 
 func (h *Handler) serveHLS() http.Handler {
@@ -75,6 +81,28 @@ func (h *Handler) serveHLS() http.Handler {
 	})
 }
 
+func (h *Handler) serveVOD(w http.ResponseWriter, r *http.Request) {
+	filename := r.PathValue("filename")
+	if !strings.HasSuffix(filename, ".mp4") || strings.Contains(filename, "/") || strings.Contains(filename, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	absPath := filepath.Join(h.vodDir, filename)
+	http.ServeFile(w, r, absPath)
+}
+
+func (h *Handler) serveThumbnail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-cache")
+	absPath := filepath.Join(h.dataDir, "thumb.jpg")
+	if _, err := os.Stat(absPath); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, absPath)
+}
+
 // StreamStatusHandler returns a handler reporting whether the stream is live.
 type LiveChecker interface {
 	IsLive() bool
@@ -100,7 +128,13 @@ type ViewerCounter interface {
 	ViewerCount() int
 }
 
-func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSProvider, tp TitleProvider, vc ViewerCounter) http.HandlerFunc {
+// CategoryProvider returns stream category and tags.
+type CategoryProvider interface {
+	GetStreamCategory(ctx context.Context) string
+	GetStreamTags(ctx context.Context) string
+}
+
+func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSProvider, tp TitleProvider, vc ViewerCounter, cp CategoryProvider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -109,6 +143,8 @@ func (h *Handler) StreamStatusHandler(lc LiveChecker, ql QualityLister, fp FPSPr
 			"fps":       fp.QualityFPS(),
 			"title":     tp.GetStreamTitle(r.Context()),
 			"viewers":   vc.ViewerCount(),
+			"category":  cp.GetStreamCategory(r.Context()),
+			"tags":      cp.GetStreamTags(r.Context()),
 		})
 	}
 }

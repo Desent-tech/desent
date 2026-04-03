@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import Link from "next/link"
 import { useAuth } from "@/hooks/use-auth"
 import { api } from "@/lib/api-client"
-import type { StreamStatus } from "@/lib/api-types"
+import type { StreamStatus, Emote } from "@/lib/api-types"
 import { VideoPlayer } from "@/components/video-player"
 import { Header } from "@/components/header"
 import { useToast } from "@/components/toast"
@@ -29,6 +29,9 @@ export default function StreamPage() {
   const [titleDraft, setTitleDraft] = useState("")
   const [wsConnected, setWsConnected] = useState(false)
   const [timeoutTarget, setTimeoutTarget] = useState<{ userId: number; username: string } | null>(null)
+  const [emotes, setEmotes] = useState<Emote[]>([])
+  const [showEmotePicker, setShowEmotePicker] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
     if (typeof window === "undefined") return false
     return localStorage.getItem("notifications") !== "off"
@@ -144,6 +147,11 @@ export default function StreamPage() {
     }
   }, [user?.token])
 
+  // Load emotes
+  useEffect(() => {
+    api.getEmotes().then(setEmotes).catch(() => {})
+  }, [])
+
   // Load chat history for current session
   useEffect(() => {
     const loadHistory = async () => {
@@ -208,6 +216,38 @@ export default function StreamPage() {
     if (!newMessage.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
     wsRef.current.send(JSON.stringify({ type: "chat", text: newMessage.trim() }))
     setNewMessage("")
+  }
+
+  const renderMessageText = (text: string) => {
+    if (!emotes.length) return text
+    const parts: (string | React.ReactElement)[] = []
+    const regex = /:([a-zA-Z0-9_]+):/g
+    let last = 0
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(text)) !== null) {
+      const emote = emotes.find((e) => e.code === match![1])
+      if (emote) {
+        if (match.index > last) parts.push(text.slice(last, match.index))
+        parts.push(
+          <img
+            key={match.index}
+            src={api.getEmoteUrl(emote.filename)}
+            alt={`:${emote.code}:`}
+            title={`:${emote.code}:`}
+            className="inline-block h-6 w-6 align-middle"
+          />
+        )
+        last = match.index + match[0].length
+      }
+    }
+    if (last < text.length) parts.push(text.slice(last))
+    return parts.length > 0 ? parts : text
+  }
+
+  const insertEmote = (code: string) => {
+    setNewMessage((prev) => prev + `:${code}: `)
+    setShowEmotePicker(false)
+    inputRef.current?.focus()
   }
 
   const qualities = streamStatus.qualities.length > 0 ? streamStatus.qualities : ["720p", "480p", "360p"]
@@ -313,6 +353,16 @@ export default function StreamPage() {
                 ) : (
                   <span className="font-semibold">{streamStatus.title}</span>
                 )}
+                {streamStatus.category && (
+                  <span className="bg-accent/10 text-accent px-2 py-0.5 rounded-full text-[10px] font-semibold">
+                    {streamStatus.category}
+                  </span>
+                )}
+                {streamStatus.tags && (
+                  <span className="text-xs text-muted-foreground hidden sm:inline">
+                    {streamStatus.tags}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -398,7 +448,7 @@ export default function StreamPage() {
                             {msg.username}
                           </span>
                           <span className="text-muted-foreground/50 mx-1">&middot;</span>
-                          <span className="text-foreground/90">{msg.text}</span>
+                          <span className="text-foreground/90">{renderMessageText(msg.text)}</span>
                         </div>
                         {isMod && msg.username !== user?.username && (
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
@@ -437,8 +487,27 @@ export default function StreamPage() {
               {/* Message input */}
               {user ? (
                 <form onSubmit={handleSendMessage} className="p-3 border-t border-border shrink-0">
+                  {/* Emote picker */}
+                  {showEmotePicker && emotes.length > 0 && (
+                    <div className="mb-2 bg-secondary rounded-xl p-3 max-h-40 overflow-y-auto">
+                      <div className="grid grid-cols-8 gap-1">
+                        {emotes.map((e) => (
+                          <button
+                            key={e.id}
+                            type="button"
+                            onClick={() => insertEmote(e.code)}
+                            title={`:${e.code}:`}
+                            className="p-1.5 rounded-lg hover:bg-accent/10 transition-colors flex items-center justify-center"
+                          >
+                            <img src={api.getEmoteUrl(e.filename)} alt={e.code} className="w-6 h-6" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <input
+                      ref={inputRef}
                       type="text"
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
@@ -446,6 +515,22 @@ export default function StreamPage() {
                       maxLength={500}
                       className="flex-1 bg-secondary rounded-xl px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground/60 focus:ring-2 focus:ring-accent/30 transition-shadow"
                     />
+                    {emotes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowEmotePicker((v) => !v)}
+                        className={`rounded-xl w-10 h-10 flex items-center justify-center transition-colors shrink-0 ${
+                          showEmotePicker ? "bg-accent/10 text-accent" : "bg-secondary text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
+                          <path d="M8 14s1.5 2 4 2 4-2 4-2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                          <circle cx="9" cy="10" r="1" fill="currentColor" />
+                          <circle cx="15" cy="10" r="1" fill="currentColor" />
+                        </svg>
+                      </button>
+                    )}
                     <button
                       type="submit"
                       disabled={!newMessage.trim() || !wsConnected}

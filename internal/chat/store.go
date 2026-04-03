@@ -13,6 +13,9 @@ type StreamSession struct {
 	Title     string `json:"title"`
 	StartedAt int64  `json:"started_at"`
 	EndedAt   *int64 `json:"ended_at,omitempty"`
+	VODPath   string `json:"vod_path,omitempty"`
+	Category  string `json:"category,omitempty"`
+	Tags      string `json:"tags,omitempty"`
 }
 
 type ChatMessage struct {
@@ -32,13 +35,27 @@ func NewStore(d *db.DB) *Store {
 	return &Store{db: d}
 }
 
-func (s *Store) CreateSession(ctx context.Context, title string) (int64, error) {
-	res, err := s.db.Write.ExecContext(ctx, "INSERT INTO stream_sessions (title) VALUES (?)", title)
+func (s *Store) CreateSession(ctx context.Context, title, category, tags string) (int64, error) {
+	res, err := s.db.Write.ExecContext(ctx,
+		"INSERT INTO stream_sessions (title, category, tags) VALUES (?, ?, ?)",
+		title, category, tags,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("chat: create session: %w", err)
 	}
 	id, _ := res.LastInsertId()
 	return id, nil
+}
+
+func (s *Store) SetVODPath(ctx context.Context, sessionID int64, vodPath string) error {
+	_, err := s.db.Write.ExecContext(ctx,
+		"UPDATE stream_sessions SET vod_path = ? WHERE id = ?",
+		vodPath, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: set vod path: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CloseSession(ctx context.Context, sessionID int64) error {
@@ -138,7 +155,7 @@ func (s *Store) GetMessages(ctx context.Context, sessionID int64, limit int, bef
 
 func (s *Store) GetSessions(ctx context.Context, limit int) ([]StreamSession, error) {
 	rows, err := s.db.Read.QueryContext(ctx,
-		"SELECT id, title, started_at, ended_at FROM stream_sessions ORDER BY id DESC LIMIT ?",
+		"SELECT id, title, started_at, ended_at, vod_path, category, tags FROM stream_sessions ORDER BY id DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -149,10 +166,35 @@ func (s *Store) GetSessions(ctx context.Context, limit int) ([]StreamSession, er
 	var sessions []StreamSession
 	for rows.Next() {
 		var s StreamSession
-		if err := rows.Scan(&s.ID, &s.Title, &s.StartedAt, &s.EndedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Title, &s.StartedAt, &s.EndedAt, &s.VODPath, &s.Category, &s.Tags); err != nil {
 			return nil, fmt.Errorf("chat: scan session: %w", err)
 		}
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
+}
+
+// GetVODPath returns the VOD path for a session.
+func (s *Store) GetVODPath(ctx context.Context, sessionID int64) (string, error) {
+	var vodPath string
+	err := s.db.Read.QueryRowContext(ctx,
+		"SELECT vod_path FROM stream_sessions WHERE id = ?", sessionID,
+	).Scan(&vodPath)
+	if err != nil {
+		return "", fmt.Errorf("chat: get vod path: %w", err)
+	}
+	return vodPath, nil
+}
+
+// GetSession returns a single session by ID.
+func (s *Store) GetSession(ctx context.Context, sessionID int64) (*StreamSession, error) {
+	var sess StreamSession
+	err := s.db.Read.QueryRowContext(ctx,
+		"SELECT id, title, started_at, ended_at, vod_path, category, tags FROM stream_sessions WHERE id = ?",
+		sessionID,
+	).Scan(&sess.ID, &sess.Title, &sess.StartedAt, &sess.EndedAt, &sess.VODPath, &sess.Category, &sess.Tags)
+	if err != nil {
+		return nil, fmt.Errorf("chat: get session: %w", err)
+	}
+	return &sess, nil
 }

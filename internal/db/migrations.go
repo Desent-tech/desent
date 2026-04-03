@@ -82,6 +82,56 @@ func Migrate(d *DB) error {
 	}
 	_, _ = d.Write.Exec("CREATE INDEX IF NOT EXISTS idx_timeouts_expires ON timeouts(user_id, expires_at)")
 
+	// VOD path column on stream_sessions.
+	_, err = d.Write.Exec("ALTER TABLE stream_sessions ADD COLUMN vod_path TEXT NOT NULL DEFAULT ''")
+	if err != nil && !isDuplicateColumn(err) {
+		return fmt.Errorf("db: migrate vod_path column: %w", err)
+	}
+
+	// Category column on stream_sessions.
+	_, err = d.Write.Exec("ALTER TABLE stream_sessions ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+	if err != nil && !isDuplicateColumn(err) {
+		return fmt.Errorf("db: migrate category column: %w", err)
+	}
+
+	// Tags column on stream_sessions.
+	_, err = d.Write.Exec("ALTER TABLE stream_sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+	if err != nil && !isDuplicateColumn(err) {
+		return fmt.Errorf("db: migrate tags column: %w", err)
+	}
+
+	// Default settings for category and tags.
+	_, _ = d.Write.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('stream_category', '')")
+	_, _ = d.Write.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('stream_tags', '')")
+
+	// Emotes table.
+	_, err = d.Write.Exec(`
+		CREATE TABLE IF NOT EXISTS emotes (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			code       TEXT    NOT NULL UNIQUE,
+			filename   TEXT    NOT NULL,
+			created_at INTEGER NOT NULL DEFAULT (unixepoch())
+		)`)
+	if err != nil {
+		return fmt.Errorf("db: migrate emotes table: %w", err)
+	}
+
+	// Clips table.
+	_, err = d.Write.Exec(`
+		CREATE TABLE IF NOT EXISTS clips (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id INTEGER NOT NULL REFERENCES stream_sessions(id),
+			title      TEXT    NOT NULL DEFAULT '',
+			filename   TEXT    NOT NULL,
+			start_time INTEGER NOT NULL,
+			duration   INTEGER NOT NULL,
+			created_by INTEGER NOT NULL REFERENCES users(id),
+			created_at INTEGER NOT NULL DEFAULT (unixepoch())
+		)`)
+	if err != nil {
+		return fmt.Errorf("db: migrate clips table: %w", err)
+	}
+
 	return nil
 }
 

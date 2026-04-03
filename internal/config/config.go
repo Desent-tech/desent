@@ -22,6 +22,8 @@ type Config struct {
 	HLSCacheMB          int
 	LogLevel            string
 	DataDir             string
+	VODDir              string
+	ClipMaxDuration     int
 	GitHubRepo          string
 	DockerServerImage   string
 	DockerWebImage      string
@@ -44,6 +46,8 @@ func Load() *Config {
 		HLSCacheMB:          getEnvInt("HLS_CACHE_MB", 128),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		DataDir:             getEnv("DATA_DIR", "./data"),
+		VODDir:              getEnv("VOD_DIR", "./data/vods"),
+		ClipMaxDuration:     getEnvInt("CLIP_MAX_DURATION", 60),
 		GitHubRepo:          getEnv("GITHUB_REPO", "Desent-tech/desent"),
 		DockerServerImage:   getEnv("DOCKER_SERVER_IMAGE", "desent/server"),
 		DockerWebImage:      getEnv("DOCKER_WEB_IMAGE", "desent/web"),

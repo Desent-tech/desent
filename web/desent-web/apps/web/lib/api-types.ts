@@ -9,6 +9,8 @@ export type StreamStatus = {
   fps: Record<string, number>
   title: string
   viewers: number
+  category?: string
+  tags?: string
 }
 
 export type ChatSession = {
@@ -16,6 +18,9 @@ export type ChatSession = {
   title: string
   started_at: number
   ended_at: number | null
+  vod_path?: string
+  category?: string
+  tags?: string
 }
 
 export type ChatMessage = {
@@ -111,4 +116,22 @@ export type UpdateProgress = {
   bytes_total: number
   message: string
   error?: string
+}
+
+export type Emote = {
+  id: number
+  code: string
+  filename: string
+  created_at: number
+}
+
+export type Clip = {
+  id: number
+  session_id: number
+  title: string
+  filename: string
+  start_time: number
+  duration: number
+  created_by: number
+  created_at: number
 }

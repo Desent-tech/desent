@@ -113,6 +113,22 @@ func (s *Store) GetStreamTitle(ctx context.Context) string {
 	return "Live Stream"
 }
 
+func (s *Store) GetStreamCategory(ctx context.Context) string {
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return ""
+	}
+	return settings["stream_category"]
+}
+
+func (s *Store) GetStreamTags(ctx context.Context) string {
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return ""
+	}
+	return settings["stream_tags"]
+}
+
 func (s *Store) UpdateUserRole(ctx context.Context, userID int64, role string) error {
 	if role != "viewer" && role != "moderator" {
 		return fmt.Errorf("admin: invalid role %q (must be viewer or moderator)", role)

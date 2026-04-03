@@ -113,6 +113,24 @@ func (s *Store) GetStreamTitle(ctx context.Context) string {
 	return "Live Stream"
 }
 
+func (s *Store) UpdateUserRole(ctx context.Context, userID int64, role string) error {
+	if role != "viewer" && role != "moderator" {
+		return fmt.Errorf("admin: invalid role %q (must be viewer or moderator)", role)
+	}
+	res, err := s.db.Write.ExecContext(ctx,
+		"UPDATE users SET role = ? WHERE id = ? AND role != 'admin'",
+		role, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("admin: update role: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("admin: user not found or is admin")
+	}
+	return nil
+}
+
 func (s *Store) IsBanned(ctx context.Context, userID int64) (bool, error) {
 	var exists bool
 	err := s.db.Read.QueryRowContext(ctx,

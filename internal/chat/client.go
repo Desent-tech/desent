@@ -15,16 +15,22 @@ const (
 	pingPeriod = 30 * time.Second
 )
 
+// TimeoutChecker checks whether a user is currently timed out.
+type TimeoutChecker interface {
+	IsTimedOut(ctx context.Context, userID int64) (bool, error)
+}
+
 type Client struct {
-	hub         *Hub
-	conn        *websocket.Conn
-	send        chan []byte
-	userID      int64
-	username    string
-	role        string
-	maxMsgLen   int
-	rateLimitMS int
-	lastMsgAt   time.Time
+	hub            *Hub
+	conn           *websocket.Conn
+	send           chan []byte
+	userID         int64
+	username       string
+	role           string
+	maxMsgLen      int
+	rateLimitMS    int
+	lastMsgAt      time.Time
+	timeoutChecker TimeoutChecker
 }
 
 // incomingMsg is what the client sends over the wire.
@@ -69,6 +75,29 @@ func (c *Client) readPump(ctx context.Context) {
 		if now.Sub(c.lastMsgAt) < time.Duration(c.rateLimitMS)*time.Millisecond {
 			continue
 		}
+
+		// Timeout check
+		if c.timeoutChecker != nil {
+			timedOut, err := c.timeoutChecker.IsTimedOut(ctx, c.userID)
+			if err != nil {
+				slog.Error("chat: check timeout", "err", err)
+			}
+			if timedOut {
+				errMsg := &Message{
+					Type:      "error",
+					Text:      "you are timed out",
+					Timestamp: now.Unix(),
+				}
+				if data, err := json.Marshal(errMsg); err == nil {
+					select {
+					case c.send <- data:
+					default:
+					}
+				}
+				continue
+			}
+		}
+
 		c.lastMsgAt = now
 
 		msg := &Message{

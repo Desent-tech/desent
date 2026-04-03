@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"nhooyr.io/websocket"
 
@@ -35,6 +36,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws/chat", h.handleWS)
 	mux.HandleFunc("GET /api/chat/history/{sessionId}", h.handleHistory)
 	mux.HandleFunc("GET /api/chat/sessions", h.handleSessions)
+}
+
+func (h *Handler) RegisterModRoutes(mux *http.ServeMux, mw func(http.Handler) http.Handler) {
+	mux.Handle("DELETE /api/chat/messages/{id}", mw(http.HandlerFunc(h.deleteMessage)))
+	mux.Handle("POST /api/chat/timeout", mw(http.HandlerFunc(h.timeoutUser)))
 }
 
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -70,14 +76,15 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		hub:         h.hub,
-		conn:        conn,
-		send:        make(chan []byte, 256),
-		userID:      claims.UserID,
-		username:    claims.Username,
-		role:        claims.Role,
-		maxMsgLen:   h.maxMsgLen,
-		rateLimitMS: h.rateLimitMS,
+		hub:            h.hub,
+		conn:           conn,
+		send:           make(chan []byte, 256),
+		userID:         claims.UserID,
+		username:       claims.Username,
+		role:           claims.Role,
+		maxMsgLen:      h.maxMsgLen,
+		rateLimitMS:    h.rateLimitMS,
+		timeoutChecker: h.store,
 	}
 
 	h.hub.register <- client
@@ -149,4 +156,67 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"sessions": sessions,
 	})
+}
+
+func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
+	msgID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid message ID"})
+		return
+	}
+
+	if err := h.store.DeleteMessage(r.Context(), msgID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "message not found"})
+			return
+		}
+		slog.Error("chat: delete message", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	h.hub.DeleteMessage(msgID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+type timeoutRequest struct {
+	UserID   int64  `json:"user_id"`
+	Duration int    `json:"duration_minutes"`
+	Reason   string `json:"reason"`
+}
+
+func (h *Handler) timeoutUser(w http.ResponseWriter, r *http.Request) {
+	var req timeoutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.UserID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
+		return
+	}
+	if req.Duration <= 0 || req.Duration > 1440 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "duration_minutes must be 1-1440"})
+		return
+	}
+
+	claims := auth.ClaimsFromContext(r.Context())
+	if claims.UserID == req.UserID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot timeout yourself"})
+		return
+	}
+
+	if err := h.store.TimeoutUser(r.Context(), req.UserID, req.Duration, claims.UserID, req.Reason); err != nil {
+		slog.Error("chat: timeout user", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "timed out"})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }

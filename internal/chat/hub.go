@@ -28,8 +28,9 @@ type Message struct {
 	Type      string `json:"type"`
 	UserID    int64  `json:"user_id,omitempty"`
 	Username  string `json:"username,omitempty"`
-	Text      string `json:"text"`
+	Text      string `json:"text,omitempty"`
 	Timestamp int64  `json:"timestamp"`
+	MessageID int64  `json:"message_id,omitempty"`
 }
 
 type Hub struct {
@@ -39,6 +40,7 @@ type Hub struct {
 	unregister    chan *Client
 	broadcast     chan *Message
 	kick          chan int64
+	deleteMsg     chan int64
 	liveCheck     LiveChecker
 	titleProvider TitleProvider
 	sessionID     int64 // current active session (0 = no stream)
@@ -54,9 +56,15 @@ func NewHub(store *Store, lc LiveChecker, tp TitleProvider) *Hub {
 		unregister:    make(chan *Client),
 		broadcast:     make(chan *Message, 256),
 		kick:          make(chan int64, 16),
+		deleteMsg:     make(chan int64, 64),
 		liveCheck:     lc,
 		titleProvider: tp,
 	}
+}
+
+// DeleteMessage broadcasts a message_deleted event to all clients.
+func (h *Hub) DeleteMessage(msgID int64) {
+	h.deleteMsg <- msgID
 }
 
 // ViewerCount returns the current number of connected chat clients.
@@ -110,6 +118,25 @@ func (h *Hub) Run(ctx context.Context) {
 			data, err := json.Marshal(msg)
 			if err != nil {
 				slog.Error("chat: marshal message", "err", err)
+				continue
+			}
+			for client := range h.clients {
+				select {
+				case client.send <- data:
+				default:
+					delete(h.clients, client)
+					close(client.send)
+				}
+			}
+
+		case msgID := <-h.deleteMsg:
+			evt := &Message{
+				Type:      "message_deleted",
+				MessageID: msgID,
+				Timestamp: time.Now().Unix(),
+			}
+			data, err := json.Marshal(evt)
+			if err != nil {
 				continue
 			}
 			for client := range h.clients {

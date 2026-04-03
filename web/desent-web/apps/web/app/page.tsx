@@ -11,6 +11,7 @@ import { useToast } from "@/components/toast"
 
 type Message = {
   id: number
+  userId?: number
   username: string
   text: string
   timestamp: number
@@ -27,8 +28,42 @@ export default function StreamPage() {
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState("")
   const [wsConnected, setWsConnected] = useState(false)
+  const [timeoutTarget, setTimeoutTarget] = useState<{ userId: number; username: string } | null>(null)
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    if (typeof window === "undefined") return false
+    return localStorage.getItem("notifications") !== "off"
+  })
   const chatEndRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  const prevLiveRef = useRef(false)
+
+  const isMod = user?.role === "admin" || user?.role === "moderator"
+
+  // Stream live notification
+  useEffect(() => {
+    const wasLive = prevLiveRef.current
+    prevLiveRef.current = streamStatus.live
+
+    if (!wasLive && streamStatus.live && notificationsEnabled && !document.hasFocus()) {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification("Stream is live!", { body: streamStatus.title })
+      }
+    }
+  }, [streamStatus.live, streamStatus.title, notificationsEnabled])
+
+  const toggleNotifications = async () => {
+    if (!notificationsEnabled) {
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        const perm = await Notification.requestPermission()
+        if (perm !== "granted") return
+      }
+      localStorage.setItem("notifications", "on")
+      setNotificationsEnabled(true)
+    } else {
+      localStorage.setItem("notifications", "off")
+      setNotificationsEnabled(false)
+    }
+  }
 
   // Scroll chat to bottom
   useEffect(() => {
@@ -66,10 +101,19 @@ export default function StreamPage() {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data)
+        if (msg.type === "message_deleted" && msg.message_id) {
+          setMessages((prev) => prev.filter((m) => m.id !== msg.message_id))
+          return
+        }
+        if (msg.type === "error") {
+          toast(msg.text || "error", "error")
+          return
+        }
         setMessages((prev) => [
           ...prev,
           {
             id: msg.timestamp * 1000 + Math.random(),
+            userId: msg.user_id,
             username: msg.username || "system",
             text: msg.text,
             timestamp: msg.timestamp * 1000,
@@ -114,6 +158,7 @@ export default function StreamPage() {
           setMessages(
             historyData.messages.map((m) => ({
               id: m.id,
+              userId: m.user_id,
               username: m.username,
               text: m.message,
               timestamp: m.created_at * 1000,
@@ -137,6 +182,24 @@ export default function StreamPage() {
       setStreamStatus((prev) => ({ ...prev, title: trimmed }))
     } catch {
       // revert on error
+    }
+  }
+
+  const handleDeleteMessage = async (msgId: number) => {
+    try {
+      await api.deleteMessage(msgId)
+    } catch {
+      toast("failed to delete message", "error")
+    }
+  }
+
+  const handleTimeout = async (userId: number, minutes: number) => {
+    try {
+      await api.timeoutUser(userId, minutes)
+      toast(`user timed out for ${minutes}m`)
+      setTimeoutTarget(null)
+    } catch {
+      toast("failed to timeout user", "error")
     }
   }
 
@@ -171,6 +234,28 @@ export default function StreamPage() {
 
               {/* Stream info bar */}
               <div className="px-5 py-4 flex items-center gap-3">
+                {/* Notification toggle */}
+                <button
+                  type="button"
+                  onClick={toggleNotifications}
+                  title={notificationsEnabled ? "notifications on" : "notifications off"}
+                  className={`p-1.5 rounded-lg transition-colors shrink-0 ${
+                    notificationsEnabled ? "text-accent hover:bg-accent/10" : "text-muted-foreground/40 hover:bg-secondary"
+                  }`}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M18 8A6 6 0 106 8c0 7-3 9-3 9h18s-3-2-3-9zM13.73 21a2 2 0 01-3.46 0"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    {!notificationsEnabled && (
+                      <path d="M4 20L20 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    )}
+                  </svg>
+                </button>
                 {streamStatus.live && (
                   <div className="flex items-center gap-1.5 bg-accent/10 text-accent px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider">
                     <span className="relative flex h-2 w-2">
@@ -301,18 +386,47 @@ export default function StreamPage() {
                   </div>
                 )}
                 {messages.map((msg) => (
-                  <div key={msg.id} className="py-1">
+                  <div key={msg.id} className="group py-1">
                     {msg.type === "system" ? (
                       <div className="text-xs text-accent/70 text-center py-2 italic">{msg.text}</div>
                     ) : (
-                      <div className="text-sm leading-relaxed">
-                        <span
-                          className={`font-semibold ${msg.username === user?.username ? "text-foreground" : "text-accent"}`}
-                        >
-                          {msg.username}
-                        </span>
-                        <span className="text-muted-foreground/50 mx-1">&middot;</span>
-                        <span className="text-foreground/90">{msg.text}</span>
+                      <div className="flex items-start gap-1">
+                        <div className="text-sm leading-relaxed flex-1 min-w-0">
+                          <span
+                            className={`font-semibold ${msg.username === user?.username ? "text-foreground" : "text-accent"}`}
+                          >
+                            {msg.username}
+                          </span>
+                          <span className="text-muted-foreground/50 mx-1">&middot;</span>
+                          <span className="text-foreground/90">{msg.text}</span>
+                        </div>
+                        {isMod && msg.username !== user?.username && (
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMessage(msg.id)}
+                              title="delete message"
+                              className="p-1 rounded hover:bg-destructive/10 text-muted-foreground/40 hover:text-destructive transition-colors"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                                <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                            {msg.userId && (
+                              <button
+                                type="button"
+                                onClick={() => setTimeoutTarget({ userId: msg.userId!, username: msg.username })}
+                                title="timeout user"
+                                className="p-1 rounded hover:bg-amber-500/10 text-muted-foreground/40 hover:text-amber-500 transition-colors"
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+                                  <path d="M12 7v5l3 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -363,6 +477,33 @@ export default function StreamPage() {
           </div>
         </div>
       </main>
+
+      {/* Timeout modal */}
+      {timeoutTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setTimeoutTarget(null)} />
+          <div className="relative bg-card rounded-2xl border border-border p-6 w-full max-w-xs mx-4 space-y-4">
+            <h2 className="text-sm font-semibold">timeout {timeoutTarget.username}</h2>
+            <div className="grid grid-cols-3 gap-2">
+              {[1, 5, 10].map((min) => (
+                <button
+                  key={min}
+                  onClick={() => handleTimeout(timeoutTarget.userId, min)}
+                  className="bg-secondary rounded-xl py-2 text-sm font-medium hover:bg-amber-500/10 hover:text-amber-500 transition-colors"
+                >
+                  {min}m
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setTimeoutTarget(null)}
+              className="w-full bg-secondary rounded-xl py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

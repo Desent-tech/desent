@@ -61,6 +61,27 @@ func Migrate(d *DB) error {
 		return fmt.Errorf("db: migrate title column: %w", err)
 	}
 
+	// Add soft-delete column to chat_messages.
+	_, err = d.Write.Exec("ALTER TABLE chat_messages ADD COLUMN deleted_at INTEGER")
+	if err != nil && !isDuplicateColumn(err) {
+		return fmt.Errorf("db: migrate deleted_at column: %w", err)
+	}
+
+	// Timeouts table.
+	_, err = d.Write.Exec(`
+		CREATE TABLE IF NOT EXISTS timeouts (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id        INTEGER NOT NULL REFERENCES users(id),
+			reason         TEXT    NOT NULL DEFAULT '',
+			timed_out_by   INTEGER NOT NULL REFERENCES users(id),
+			created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+			expires_at     INTEGER NOT NULL
+		)`)
+	if err != nil {
+		return fmt.Errorf("db: migrate timeouts table: %w", err)
+	}
+	_, _ = d.Write.Exec("CREATE INDEX IF NOT EXISTS idx_timeouts_expires ON timeouts(user_id, expires_at)")
+
 	return nil
 }
 

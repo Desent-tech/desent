@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { api } from "@/lib/api-client"
 import { useToast } from "@/components/toast"
 import type { QualitiesConfig } from "@/lib/api-types"
@@ -32,8 +32,44 @@ export default function AdminSettingsPage() {
   const [iconPreview, setIconPreview] = useState<string | null>(null)
   const [iconSaving, setIconSaving] = useState(false)
   const [iconKey, setIconKey] = useState(0)
+  const [streamKey, setStreamKey] = useState("")
+  const [showKey, setShowKey] = useState(false)
+  const [keyLoading, setKeyLoading] = useState(false)
+  const [confirmRegen, setConfirmRegen] = useState(false)
   const iconInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
+
+  const loadStreamKey = useCallback(async () => {
+    try {
+      const data = await api.getStreamKey()
+      setStreamKey(data.stream_key)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  useEffect(() => {
+    loadStreamKey()
+  }, [loadStreamKey])
+
+  const handleRegenerate = async () => {
+    setKeyLoading(true)
+    try {
+      const data = await api.regenerateStreamKey()
+      setStreamKey(data.stream_key)
+      setConfirmRegen(false)
+      toast("stream key regenerated")
+    } catch {
+      toast("failed to regenerate key", "error")
+    } finally {
+      setKeyLoading(false)
+    }
+  }
+
+  const handleCopyKey = () => {
+    navigator.clipboard.writeText(streamKey)
+    toast("stream key copied")
+  }
 
   useEffect(() => {
     api
@@ -195,6 +231,61 @@ export default function AdminSettingsPage() {
             onChange={handleIconChange}
             className="hidden"
           />
+        </div>
+      </div>
+
+      {/* Stream key */}
+      <div className="rounded-2xl bg-card border border-border p-5">
+        <p className="text-sm font-semibold">stream key</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          use this key in OBS or your streaming software
+        </p>
+        <div className="mt-3 space-y-3">
+          <div className="flex items-center gap-2">
+            <input
+              type={showKey ? "text" : "password"}
+              value={streamKey}
+              readOnly
+              className="flex-1 bg-secondary rounded-xl px-4 py-2.5 text-sm font-mono outline-none"
+            />
+            <button
+              onClick={() => setShowKey((v) => !v)}
+              className="px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+            >
+              {showKey ? "hide" : "show"}
+            </button>
+            <button
+              onClick={handleCopyKey}
+              className="px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+            >
+              copy
+            </button>
+          </div>
+          {confirmRegen ? (
+            <div className="flex items-center gap-2">
+              <p className="text-xs text-destructive flex-1">this will disconnect the current stream. are you sure?</p>
+              <button
+                onClick={() => setConfirmRegen(false)}
+                className="px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground"
+              >
+                cancel
+              </button>
+              <button
+                onClick={handleRegenerate}
+                disabled={keyLoading}
+                className="px-3 py-1.5 text-xs rounded-full bg-destructive text-destructive-foreground hover:opacity-80 transition-opacity disabled:opacity-50"
+              >
+                {keyLoading ? "regenerating..." : "confirm"}
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmRegen(true)}
+              className="px-3 py-1.5 text-xs rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+            >
+              regenerate key
+            </button>
+          )}
         </div>
       </div>
 

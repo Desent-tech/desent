@@ -6,7 +6,7 @@ import { api, ApiError } from "@/lib/api-client"
 export type User = {
   token: string
   username: string
-  role: "admin" | "user"
+  role: "admin" | "moderator" | "viewer"
 }
 
 const REFRESH_INTERVAL = 4 * 60 * 60 * 1000 // 4 hours
@@ -18,9 +18,9 @@ export function useAuth() {
   useEffect(() => {
     const token = localStorage.getItem("token")
     const username = localStorage.getItem("username")
-    const role = localStorage.getItem("role") as "admin" | "user" | null
+    const role = localStorage.getItem("role") as "admin" | "moderator" | "viewer" | null
     if (token && username) {
-      setUser({ token, username, role: role || "user" })
+      setUser({ token, username, role: role || "viewer" })
     }
     setLoading(false)
   }, [])
@@ -34,7 +34,7 @@ export function useAuth() {
         const data = await api.refreshToken()
         localStorage.setItem("token", data.token)
         localStorage.setItem("role", data.role)
-        setUser((prev) => prev ? { ...prev, token: data.token, role: data.role as "admin" | "user" } : null)
+        setUser((prev) => prev ? { ...prev, token: data.token, role: data.role as "admin" | "moderator" | "viewer" } : null)
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           localStorage.removeItem("token")
@@ -53,7 +53,7 @@ export function useAuth() {
     localStorage.setItem("token", token)
     localStorage.setItem("username", username)
     localStorage.setItem("role", role)
-    setUser({ token, username, role: role as "admin" | "user" })
+    setUser({ token, username, role: role as "admin" | "moderator" | "viewer" })
   }, [])
 
   const logout = useCallback(() => {

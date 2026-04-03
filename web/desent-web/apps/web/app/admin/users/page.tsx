@@ -59,6 +59,20 @@ export default function AdminUsersPage() {
     }
   }
 
+  const handleToggleRole = async (u: UserInfo) => {
+    const newRole = u.role === "moderator" ? "viewer" : "moderator"
+    setActionLoading(true)
+    try {
+      await api.updateUserRole(u.id, newRole)
+      toast(`${u.username} is now ${newRole}`)
+      await fetchUsers()
+    } catch {
+      toast("failed to update role", "error")
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   if (loading) {
     return <p className="text-sm text-muted-foreground">loading...</p>
   }
@@ -71,7 +85,7 @@ export default function AdminUsersPage() {
 
       {/* Desktop table */}
       <div className="hidden sm:block bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="grid grid-cols-[1fr_80px_80px_100px_100px] gap-3 px-5 py-3 border-b border-border text-xs text-muted-foreground font-medium">
+        <div className="grid grid-cols-[1fr_80px_80px_100px_120px] gap-3 px-5 py-3 border-b border-border text-xs text-muted-foreground font-medium">
           <span>username</span>
           <span>role</span>
           <span>status</span>
@@ -81,7 +95,7 @@ export default function AdminUsersPage() {
         {users.map((u) => (
           <div
             key={u.id}
-            className="grid grid-cols-[1fr_80px_80px_100px_100px] gap-3 px-5 py-3 border-b border-border last:border-b-0 items-center"
+            className="grid grid-cols-[1fr_80px_80px_100px_120px] gap-3 px-5 py-3 border-b border-border last:border-b-0 items-center"
           >
             <span className="text-sm font-medium truncate">{u.username}</span>
             <span>
@@ -89,8 +103,12 @@ export default function AdminUsersPage() {
                 <span className="bg-accent/10 text-accent px-2 py-0.5 rounded-full text-xs font-semibold">
                   admin
                 </span>
+              ) : u.role === "moderator" ? (
+                <span className="bg-amber-500/10 text-amber-500 px-2 py-0.5 rounded-full text-xs font-semibold">
+                  mod
+                </span>
               ) : (
-                <span className="text-xs text-muted-foreground">user</span>
+                <span className="text-xs text-muted-foreground">viewer</span>
               )}
             </span>
             <span>
@@ -101,9 +119,16 @@ export default function AdminUsersPage() {
               )}
             </span>
             <span className="text-xs text-muted-foreground">{formatDate(u.created_at)}</span>
-            <span className="text-right">
+            <span className="flex items-center justify-end gap-2">
               {u.role !== "admin" && u.username !== currentUser?.username && (
                 <>
+                  <button
+                    onClick={() => handleToggleRole(u)}
+                    disabled={actionLoading}
+                    className="text-xs text-amber-500 hover:opacity-70 transition-opacity disabled:opacity-30"
+                  >
+                    {u.role === "moderator" ? "demote" : "mod"}
+                  </button>
                   {u.banned ? (
                     <button
                       onClick={() => handleUnban(u)}
@@ -140,32 +165,46 @@ export default function AdminUsersPage() {
                     admin
                   </span>
                 )}
+                {u.role === "moderator" && (
+                  <span className="bg-amber-500/10 text-amber-500 px-2 py-0.5 rounded-full text-xs font-semibold">
+                    mod
+                  </span>
+                )}
                 {u.banned && <span className="text-destructive text-xs">banned</span>}
               </div>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">joined {formatDate(u.created_at)}</span>
-              {u.role !== "admin" && u.username !== currentUser?.username && (
-                <>
-                  {u.banned ? (
+              <div className="flex items-center gap-2">
+                {u.role !== "admin" && u.username !== currentUser?.username && (
+                  <>
                     <button
-                      onClick={() => handleUnban(u)}
+                      onClick={() => handleToggleRole(u)}
                       disabled={actionLoading}
-                      className="text-xs text-accent hover:opacity-70 transition-opacity disabled:opacity-30"
+                      className="text-xs text-amber-500 hover:opacity-70 transition-opacity disabled:opacity-30"
                     >
-                      unban
+                      {u.role === "moderator" ? "demote" : "mod"}
                     </button>
-                  ) : (
-                    <button
-                      onClick={() => setBanTarget(u)}
-                      disabled={actionLoading}
-                      className="text-xs text-destructive hover:opacity-70 transition-opacity disabled:opacity-30"
-                    >
-                      ban
-                    </button>
-                  )}
-                </>
-              )}
+                    {u.banned ? (
+                      <button
+                        onClick={() => handleUnban(u)}
+                        disabled={actionLoading}
+                        className="text-xs text-accent hover:opacity-70 transition-opacity disabled:opacity-30"
+                      >
+                        unban
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setBanTarget(u)}
+                        disabled={actionLoading}
+                        className="text-xs text-destructive hover:opacity-70 transition-opacity disabled:opacity-30"
+                      >
+                        ban
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
             {u.banned && u.ban_reason && (
               <p className="text-xs text-muted-foreground">reason: {u.ban_reason}</p>

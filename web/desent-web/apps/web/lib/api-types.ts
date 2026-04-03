@@ -36,11 +36,12 @@ export type ChatHistoryResponse = {
 }
 
 export type WsChatMessage = {
-  type: "chat" | "system"
-  text: string
+  type: "chat" | "system" | "message_deleted" | "error"
+  text?: string
   user_id?: number
   username?: string
   timestamp: number
+  message_id?: number
 }
 
 export type AdminSettings = Record<string, string>

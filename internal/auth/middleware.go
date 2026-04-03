@@ -40,6 +40,17 @@ func RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+func RequireModOrAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims := ClaimsFromContext(r.Context())
+		if claims == nil || (claims.Role != "admin" && claims.Role != "moderator") {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func ClaimsFromContext(ctx context.Context) *Claims {
 	v, _ := ctx.Value(claimsKey).(*Claims)
 	return v

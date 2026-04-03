@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -104,11 +106,37 @@ func main() {
 	}
 	go segmentCache.Start(ctx)
 
+	// Load persisted settings from DB
+	adminStore := admin.NewStore(database)
+
+	// Resolve stream key: env override > DB > generate new
+	streamKey := cfg.StreamKey
+	if settings, err := adminStore.GetSettings(ctx); err == nil {
+		if v, ok := settings["stream_key"]; ok && v != "" {
+			if cfg.StreamKey == "live" { // only use DB key if env is default
+				streamKey = v
+			}
+		}
+	}
+	if streamKey == "live" {
+		// Generate and persist a random key
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			slog.Error("failed to generate stream key", "err", err)
+			os.Exit(1)
+		}
+		streamKey = hex.EncodeToString(b)
+		if err := adminStore.UpdateSettings(ctx, map[string]string{"stream_key": streamKey}); err != nil {
+			slog.Error("failed to persist stream key", "err", err)
+		}
+		slog.Info("generated new stream key", "key", streamKey)
+	}
+
 	// Ingest (FFmpeg subprocess)
 	ingestMgr := ingest.NewManager(ingest.Config{
 		FFmpegPath: cfg.FFmpegPath,
 		RTMPAddr:   cfg.RTMPAddr,
-		StreamKey:  cfg.StreamKey,
+		StreamKey:  streamKey,
 		HLSDir:     cfg.HLSDir,
 		OnStreamEnd: func() {
 			hls.CleanAll(cfg.HLSDir)
@@ -117,7 +145,6 @@ func main() {
 	})
 
 	// Load persisted qualities from DB
-	adminStore := admin.NewStore(database)
 	if settings, err := adminStore.GetSettings(ctx); err == nil {
 		if v, ok := settings["qualities_enabled"]; ok && v != "" {
 			names := strings.Split(v, ",")
@@ -177,6 +204,10 @@ func main() {
 
 	chatHandler := chat.NewHandler(chatHub, chatStore, tokenService, adminStore, cfg.ChatMaxMsgLen, cfg.ChatRateLimitMS)
 	chatHandler.RegisterRoutes(mux)
+	modMW := func(h http.Handler) http.Handler {
+		return auth.RequireAuth(tokenService)(auth.RequireModOrAdmin(h))
+	}
+	chatHandler.RegisterModRoutes(mux, modMW)
 
 	// HLS streaming
 	hlsHandler := hls.NewHandler(cfg.HLSDir, segmentCache)

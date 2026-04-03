@@ -131,6 +131,16 @@ class ApiClient {
     return `${url.origin}/ws/chat?token=${encodeURIComponent(token)}`
   }
 
+  // Chat moderation
+
+  deleteMessage(messageId: number): Promise<{ status: string }> {
+    return this.delete(`/api/chat/messages/${messageId}`)
+  }
+
+  timeoutUser(userId: number, durationMinutes: number, reason?: string): Promise<{ status: string }> {
+    return this.post("/api/chat/timeout", { user_id: userId, duration_minutes: durationMinutes, reason: reason || "" })
+  }
+
   // Admin
 
   getAdminSettings(): Promise<AdminSettings> {
@@ -151,6 +161,18 @@ class ApiClient {
 
   unbanUser(userId: number): Promise<void> {
     return this.delete(`/api/admin/ban/${userId}`)
+  }
+
+  updateUserRole(userId: number, role: string): Promise<{ status: string }> {
+    return this.put(`/api/admin/users/${userId}/role`, { role })
+  }
+
+  getStreamKey(): Promise<{ stream_key: string; rtmp_url: string }> {
+    return this.get("/api/admin/stream-key")
+  }
+
+  regenerateStreamKey(): Promise<{ stream_key: string; rtmp_url: string }> {
+    return this.post("/api/admin/stream-key/regenerate")
   }
 
   getAdminStats(): Promise<ServerStats> {

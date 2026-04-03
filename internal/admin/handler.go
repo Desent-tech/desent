@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -29,6 +31,8 @@ type IngestManager interface {
 	ResolvedPreset() string
 	Restart()
 	StartedAt() time.Time
+	GetStreamKey() string
+	SetStreamKey(key string)
 }
 
 var allowedIconExts = []string{".png", ".jpg", ".jpeg", ".svg", ".ico"}
@@ -67,7 +71,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.Handler) http.
 	mux.Handle("GET /api/admin/stats", mw(http.HandlerFunc(h.getStats)))
 	mux.Handle("GET /api/admin/qualities", mw(http.HandlerFunc(h.getQualities)))
 	mux.Handle("PUT /api/admin/qualities", mw(http.HandlerFunc(h.updateQualities)))
+	mux.Handle("PUT /api/admin/users/{userId}/role", mw(http.HandlerFunc(h.updateUserRole)))
 	mux.Handle("POST /api/admin/icon", mw(http.HandlerFunc(h.uploadIcon)))
+	mux.Handle("GET /api/admin/stream-key", mw(http.HandlerFunc(h.getStreamKey)))
+	mux.Handle("POST /api/admin/stream-key/regenerate", mw(http.HandlerFunc(h.regenerateStreamKey)))
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +357,35 @@ func dirSizeMB(dir string) float64 {
 	return float64(total) / 1024.0 / 1024.0
 }
 
+type roleRequest struct {
+	Role string `json:"role"`
+}
+
+func (h *Handler) updateUserRole(w http.ResponseWriter, r *http.Request) {
+	userID, err := strconv.ParseInt(r.PathValue("userId"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
+		return
+	}
+
+	var req roleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	if err := h.store.UpdateUserRole(r.Context(), userID, req.Role); err != nil {
+		if strings.Contains(err.Error(), "invalid role") || strings.Contains(err.Error(), "not found or is admin") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		slog.Error("admin: update role", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "role updated"})
+}
+
 func (h *Handler) uploadIcon(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(1 << 20); err != nil { // 1MB max
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form data"})
@@ -390,6 +426,49 @@ func (h *Handler) uploadIcon(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("admin: icon updated")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) getStreamKey(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"stream_key": h.ingestMgr.GetStreamKey(),
+		"rtmp_url":   "rtmp://{your-domain}:1935/live/" + h.ingestMgr.GetStreamKey(),
+	})
+}
+
+func (h *Handler) regenerateStreamKey(w http.ResponseWriter, r *http.Request) {
+	key, err := generateStreamKey()
+	if err != nil {
+		slog.Error("admin: generate stream key", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate key"})
+		return
+	}
+
+	if err := h.store.UpdateSettings(r.Context(), map[string]string{"stream_key": key}); err != nil {
+		slog.Error("admin: persist stream key", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	h.ingestMgr.SetStreamKey(key)
+
+	if h.ingestMgr.IsLive() {
+		h.ingestMgr.Restart()
+	}
+
+	slog.Info("admin: stream key regenerated")
+	writeJSON(w, http.StatusOK, map[string]string{
+		"stream_key": key,
+		"rtmp_url":   "rtmp://{your-domain}:1935/live/" + key,
+	})
+}
+
+// GenerateStreamKey creates a random 32-char hex key.
+func generateStreamKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func isAllowedIconExt(ext string) bool {

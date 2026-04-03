@@ -67,6 +67,20 @@ func IsValidPreset(p string) bool {
 	return false
 }
 
+// SetStreamKey updates the stream key used for RTMP authentication.
+func (m *Manager) SetStreamKey(key string) {
+	m.mu.Lock()
+	m.cfg.StreamKey = key
+	m.mu.Unlock()
+}
+
+// GetStreamKey returns the current stream key.
+func (m *Manager) GetStreamKey() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.StreamKey
+}
+
 // SetPreset updates the x264 preset. Use "auto" for CPU-based auto-detection.
 func (m *Manager) SetPreset(p string) {
 	m.mu.Lock()

@@ -64,8 +64,47 @@ func (s *Store) SaveMessage(ctx context.Context, sessionID, userID int64, userna
 	return nil
 }
 
+func (s *Store) DeleteMessage(ctx context.Context, msgID int64) error {
+	res, err := s.db.Write.ExecContext(ctx,
+		"UPDATE chat_messages SET deleted_at = unixepoch() WHERE id = ? AND deleted_at IS NULL",
+		msgID,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: delete message: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("chat: message %d not found", msgID)
+	}
+	return nil
+}
+
+func (s *Store) TimeoutUser(ctx context.Context, userID int64, durationMin int, timedOutBy int64, reason string) error {
+	expiresAt := time.Now().Add(time.Duration(durationMin) * time.Minute).Unix()
+	_, err := s.db.Write.ExecContext(ctx,
+		"INSERT INTO timeouts (user_id, reason, timed_out_by, expires_at) VALUES (?, ?, ?, ?)",
+		userID, reason, timedOutBy, expiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: timeout user: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) IsTimedOut(ctx context.Context, userID int64) (bool, error) {
+	var exists bool
+	err := s.db.Read.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM timeouts WHERE user_id = ? AND expires_at > unixepoch())",
+		userID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("chat: check timeout: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Store) GetMessages(ctx context.Context, sessionID int64, limit int, beforeID int64) ([]ChatMessage, error) {
-	query := "SELECT id, session_id, user_id, username, message, created_at FROM chat_messages WHERE session_id = ?"
+	query := "SELECT id, session_id, user_id, username, message, created_at FROM chat_messages WHERE session_id = ? AND deleted_at IS NULL"
 	args := []any{sessionID}
 
 	if beforeID > 0 {

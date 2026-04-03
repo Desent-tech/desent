@@ -39,5 +39,5 @@ dist/
 .vercel/
 coverage/
 npm-debug.log*
-*.pem
-CLAUDE.md
+*.md
+!README.md
